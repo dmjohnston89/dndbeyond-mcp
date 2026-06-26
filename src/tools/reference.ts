@@ -848,6 +848,12 @@ export async function getItem(
   };
 }
 
+/** List the account's source books (id + name) as JSON, for client-side pickers. */
+export async function listSources(client: DdbClient): Promise<ToolResult> {
+  const config = await getGameConfig(client);
+  return { content: [{ type: "text", text: JSON.stringify(config.sources ?? []) }] };
+}
+
 // --- Feat types ---
 
 interface DdbFeat {

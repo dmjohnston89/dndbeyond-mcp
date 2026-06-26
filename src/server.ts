@@ -51,6 +51,7 @@ import {
   getMonster,
   searchItems,
   getItem,
+  listSources,
   searchFeats,
   getCondition,
   searchClasses,
@@ -792,6 +793,13 @@ export async function startServer(): Promise<void> {
       getItem(client, {
         itemName: params.itemName,
       })
+  );
+
+  server.tool(
+    "list_sources",
+    "List the account's source books (id + name) as JSON",
+    {},
+    async () => listSources(client),
   );
 
   // Register reference tools - feats

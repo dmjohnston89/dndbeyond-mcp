@@ -5,6 +5,7 @@ import {
   searchFeats,
   getCondition,
   searchClasses,
+  listSources,
 } from "../../src/tools/reference.js";
 import { DdbClient } from "../../src/api/client.js";
 import { ItemSearchParams, FeatSearchParams } from "../../src/types/reference.js";
@@ -230,6 +231,15 @@ describe("searchClasses", () => {
     const result = await searchClasses(mockClient, {});
     expect(result.content[0].text).toContain("Fighter");
     expect(result.content[0].text).toContain("Wizard");
+  });
+});
+
+describe("listSources", () => {
+  it("returns config sources as JSON", async () => {
+    const client = fakeClientWithSources([]);
+    const res = await listSources(client);
+    const parsed = JSON.parse(res.content[0].text as string);
+    expect(parsed).toEqual([{ id: 999, name: "Test Book" }]);
   });
 });
 
