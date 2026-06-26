@@ -23,6 +23,8 @@ export interface ItemSearchParams {
   rarity?: string;
   type?: string;
   attunement?: boolean;
+  source?: string;
+  page?: number;
 }
 
 export interface FeatSearchParams {

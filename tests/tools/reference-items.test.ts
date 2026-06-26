@@ -5,9 +5,27 @@ import {
   searchFeats,
   getCondition,
   searchClasses,
+  listSources,
 } from "../../src/tools/reference.js";
 import { DdbClient } from "../../src/api/client.js";
 import { ItemSearchParams, FeatSearchParams } from "../../src/types/reference.js";
+
+const MOCK_CONFIG_WITH_SOURCES = {
+  challengeRatings: [],
+  monsterTypes: [],
+  environments: [],
+  alignments: [],
+  damageTypes: [],
+  senses: [],
+  sources: [{ id: 999, name: "Test Book" }],
+};
+
+function fakeClientWithSources(items: unknown[]) {
+  return {
+    get: vi.fn().mockResolvedValue(items),
+    getRaw: vi.fn().mockResolvedValue(MOCK_CONFIG_WITH_SOURCES),
+  } as unknown as DdbClient;
+}
 
 const MOCK_ITEMS = [
   {
@@ -213,5 +231,45 @@ describe("searchClasses", () => {
     const result = await searchClasses(mockClient, {});
     expect(result.content[0].text).toContain("Fighter");
     expect(result.content[0].text).toContain("Wizard");
+  });
+});
+
+describe("listSources", () => {
+  it("returns config sources as JSON", async () => {
+    const client = fakeClientWithSources([]);
+    const res = await listSources(client);
+    const parsed = JSON.parse(res.content[0].text as string);
+    expect(parsed).toEqual([{ id: 999, name: "Test Book" }]);
+  });
+});
+
+describe("searchItems source/page", () => {
+  it("filters items by source name", async () => {
+    const items = [
+      { id: 1, name: "Aaa Blade", type: "Weapon", filterType: "Weapon", rarity: "Rare", requiresAttunement: false, sources: [{ sourceId: 999 }] },
+      { id: 2, name: "Bbb Ring", type: "Ring", filterType: "Ring", rarity: "Rare", requiresAttunement: true, sources: [{ sourceId: 1 }] },
+      { id: 3, name: "Ccc Cloak", type: "Wondrous", filterType: "Wondrous", rarity: "Rare", requiresAttunement: false, sources: [{ sourceId: 999 }] },
+    ];
+    const client = fakeClientWithSources(items);
+    const res = await searchItems(client, { rarity: "Rare", source: "Test Book" });
+    const text = res.content[0].text as string;
+    expect(text).toMatch(/Aaa Blade/);
+    expect(text).toMatch(/Ccc Cloak/);
+    expect(text).not.toMatch(/Bbb Ring/);
+    expect(text).toMatch(/2 found/);
+  });
+
+  it("paginates with page (page size 30)", async () => {
+    const items = Array.from({ length: 35 }, (_, i) => ({
+      id: i, name: `Item ${String(i).padStart(2, "0")}`, type: "Wondrous", filterType: "Wondrous",
+      rarity: "Common", requiresAttunement: false, sources: [{ sourceId: 1 }],
+    }));
+    const client = fakeClientWithSources(items);
+    const page2 = await searchItems(client, { rarity: "Common", page: 2 });
+    const text = page2.content[0].text as string;
+    expect(text).toMatch(/showing 5 of 35/);
+    expect(text).toMatch(/of 35/);
+    expect(text).toMatch(/Item 30/);
+    expect(text).not.toMatch(/Item 05/);
   });
 });

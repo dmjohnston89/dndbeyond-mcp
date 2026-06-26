@@ -63,6 +63,14 @@ async function getGameConfig(client: DdbClient): Promise<GameConfig> {
   return cachedConfig;
 }
 
+function resolveSourceId(config: GameConfig, source?: string): number | undefined {
+  if (!source) return undefined;
+  const q = source.toLowerCase().trim();
+  const fromConfig = config.sources?.find((s) => s.name.toLowerCase().includes(q) || q.includes(s.name.toLowerCase()));
+  if (fromConfig) return fromConfig.id;
+  return SOURCE_MAP[q];
+}
+
 // --- Monster service types ---
 
 interface MonsterServiceResponse {
@@ -442,28 +450,8 @@ export async function searchMonsters(
   const typeMap = new Map(config.monsterTypes.map((t) => [t.id, t.name]));
 
   // Resolve source name to ID if provided
-  let sourceId: string | undefined;
-  if (params.source) {
-    const sourceLower = params.source.toLowerCase().trim();
-
-    // Try config sources first
-    if (config.sources) {
-      const configSource = config.sources.find((s) =>
-        s.name.toLowerCase().includes(sourceLower) || sourceLower.includes(s.name.toLowerCase())
-      );
-      if (configSource) {
-        sourceId = configSource.id.toString();
-      }
-    }
-
-    // Fallback to hardcoded map
-    if (!sourceId) {
-      const mappedId = SOURCE_MAP[sourceLower];
-      if (mappedId) {
-        sourceId = mappedId.toString();
-      }
-    }
-  }
+  const resolvedId = resolveSourceId(config, params.source);
+  const sourceId = resolvedId !== undefined ? resolvedId.toString() : undefined;
 
   let allMonsters: DdbMonster[] = [];
   let totalInDataset = 0;
@@ -777,12 +765,19 @@ export async function searchItems(
     );
   }
 
+  if (params.source) {
+    const config = await getGameConfig(client);
+    const id = resolveSourceId(config, params.source);
+    matched = id === undefined ? [] : matched.filter((i) => i.sources?.some((s) => s.sourceId === id));
+  }
+
   // Sort by name
   matched.sort((a, b) => a.name.localeCompare(b.name));
 
-  // Limit results
+  // Paginate results (30 per page)
   const total = matched.length;
-  matched = matched.slice(0, 30);
+  const page = Math.max(1, params.page ?? 1);
+  matched = matched.slice((page - 1) * 30, (page - 1) * 30 + 30);
 
   if (matched.length === 0) {
     return {
@@ -790,7 +785,9 @@ export async function searchItems(
     };
   }
 
-  const lines = [`# Item Search Results (${total > 30 ? `showing 30 of ${total}` : `${total} found`})\n`];
+  const shown = matched.length;
+  const header = total > shown ? `showing ${shown} of ${total} (page ${page})` : `${total} found`;
+  const lines = [`# Item Search Results (${header})\n`];
   for (const item of matched) {
     const attune = item.requiresAttunement ? " (attunement)" : "";
     lines.push(`- **${item.name}** — ${item.rarity || "Common"} ${item.filterType || item.type || ""}${attune}`);
@@ -849,6 +846,12 @@ export async function getItem(
   return {
     content: [{ type: "text", text: lines.join("\n") }],
   };
+}
+
+/** List the account's source books (id + name) as JSON, for client-side pickers. */
+export async function listSources(client: DdbClient): Promise<ToolResult> {
+  const config = await getGameConfig(client);
+  return { content: [{ type: "text", text: JSON.stringify(config.sources ?? []) }] };
 }
 
 // --- Feat types ---

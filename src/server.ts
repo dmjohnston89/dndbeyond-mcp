@@ -51,6 +51,7 @@ import {
   getMonster,
   searchItems,
   getItem,
+  listSources,
   searchFeats,
   getCondition,
   searchClasses,
@@ -769,12 +770,16 @@ export async function startServer(): Promise<void> {
         .string()
         .optional()
         .describe("Item type (weapon, armor, potion, ring, etc.)"),
+      source: z.string().optional().describe("Source book name (e.g., 'Dungeon Master\\'s Guide')"),
+      page: z.coerce.number().optional().describe("Page number (default: 1, 30 results per page)"),
     },
     async (params) =>
       searchItems(client, {
         name: params.name,
         rarity: params.rarity,
         type: params.type,
+        source: params.source,
+        page: params.page,
       })
   );
 
@@ -788,6 +793,13 @@ export async function startServer(): Promise<void> {
       getItem(client, {
         itemName: params.itemName,
       })
+  );
+
+  server.tool(
+    "list_sources",
+    "List the account's source books (id + name) as JSON",
+    {},
+    async () => listSources(client),
   );
 
   // Register reference tools - feats
