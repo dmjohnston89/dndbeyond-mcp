@@ -257,6 +257,7 @@ describe("searchItems source/page", () => {
     const client = fakeClientWithSources(items);
     const page2 = await searchItems(client, { rarity: "Common", page: 2 });
     const text = page2.content[0].text as string;
+    expect(text).toMatch(/showing 5 of 35/);
     expect(text).toMatch(/of 35/);
     expect(text).toMatch(/Item 30/);
     expect(text).not.toMatch(/Item 05/);

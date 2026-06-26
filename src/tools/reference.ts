@@ -450,28 +450,8 @@ export async function searchMonsters(
   const typeMap = new Map(config.monsterTypes.map((t) => [t.id, t.name]));
 
   // Resolve source name to ID if provided
-  let sourceId: string | undefined;
-  if (params.source) {
-    const sourceLower = params.source.toLowerCase().trim();
-
-    // Try config sources first
-    if (config.sources) {
-      const configSource = config.sources.find((s) =>
-        s.name.toLowerCase().includes(sourceLower) || sourceLower.includes(s.name.toLowerCase())
-      );
-      if (configSource) {
-        sourceId = configSource.id.toString();
-      }
-    }
-
-    // Fallback to hardcoded map
-    if (!sourceId) {
-      const mappedId = SOURCE_MAP[sourceLower];
-      if (mappedId) {
-        sourceId = mappedId.toString();
-      }
-    }
-  }
+  const resolvedId = resolveSourceId(config, params.source);
+  const sourceId = resolvedId !== undefined ? resolvedId.toString() : undefined;
 
   let allMonsters: DdbMonster[] = [];
   let totalInDataset = 0;
@@ -805,7 +785,9 @@ export async function searchItems(
     };
   }
 
-  const lines = [`# Item Search Results (${total > 30 ? `showing 30 of ${total}` : `${total} found`})\n`];
+  const shown = matched.length;
+  const header = total > shown ? `showing ${shown} of ${total} (page ${page})` : `${total} found`;
+  const lines = [`# Item Search Results (${header})\n`];
   for (const item of matched) {
     const attune = item.requiresAttunement ? " (attunement)" : "";
     lines.push(`- **${item.name}** — ${item.rarity || "Common"} ${item.filterType || item.type || ""}${attune}`);
