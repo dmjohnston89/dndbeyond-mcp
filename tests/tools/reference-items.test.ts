@@ -257,6 +257,8 @@ describe("searchItems source/page", () => {
     expect(text).toMatch(/Ccc Cloak/);
     expect(text).not.toMatch(/Bbb Ring/);
     expect(text).toMatch(/2 found/);
+    expect(text).toMatch(/Aaa Blade\*\* — Rare Weapon \[#1\]/);
+    expect(text).toMatch(/\[#3\]/); // Ccc Cloak
   });
 
   it("paginates with page (page size 30)", async () => {

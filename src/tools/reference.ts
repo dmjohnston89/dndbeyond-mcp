@@ -790,7 +790,7 @@ export async function searchItems(
   const lines = [`# Item Search Results (${header})\n`];
   for (const item of matched) {
     const attune = item.requiresAttunement ? " (attunement)" : "";
-    lines.push(`- **${item.name}** — ${item.rarity || "Common"} ${item.filterType || item.type || ""}${attune}`);
+    lines.push(`- **${item.name}** — ${item.rarity || "Common"} ${item.filterType || item.type || ""}${attune} [#${item.id}]`);
   }
 
   return {
