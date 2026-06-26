@@ -769,12 +769,16 @@ export async function startServer(): Promise<void> {
         .string()
         .optional()
         .describe("Item type (weapon, armor, potion, ring, etc.)"),
+      source: z.string().optional().describe("Source book name (e.g., 'Dungeon Master\\'s Guide')"),
+      page: z.coerce.number().optional().describe("Page number (default: 1, 30 results per page)"),
     },
     async (params) =>
       searchItems(client, {
         name: params.name,
         rarity: params.rarity,
         type: params.type,
+        source: params.source,
+        page: params.page,
       })
   );
 
