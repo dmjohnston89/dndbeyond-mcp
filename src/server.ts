@@ -703,9 +703,13 @@ export async function startServer(): Promise<void> {
     "Get full details for a specific spell by name from the compendium",
     {
       spellName: z.string().describe("The spell name"),
+      edition: z
+        .enum(["2014", "2024"])
+        .optional()
+        .describe("Rules edition to prefer: 2024 (current) or 2014 (legacy). Defaults to the first match."),
     },
     async (params) =>
-      getSpell(client, { spellName: params.spellName })
+      getSpell(client, { spellName: params.spellName, edition: params.edition })
   );
 
   // Register reference tools - monsters

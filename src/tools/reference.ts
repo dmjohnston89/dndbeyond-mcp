@@ -150,8 +150,9 @@ async function loadSpellCompendium(client: DdbClient): Promise<DdbSpell[]> {
       );
 
       for (const spell of cantrips ?? []) {
-        if (spell.definition?.name && !allSpells.has(spell.definition.name)) {
-          allSpells.set(spell.definition.name, spell);
+        const key = `${spell.definition?.name}|${spell.definition?.isLegacy ? "L" : "N"}`;
+        if (spell.definition?.name && !allSpells.has(key)) {
+          allSpells.set(key, spell);
         }
       }
     } catch {
@@ -167,8 +168,9 @@ async function loadSpellCompendium(client: DdbClient): Promise<DdbSpell[]> {
       );
 
       for (const spell of spells ?? []) {
-        if (spell.definition?.name && !allSpells.has(spell.definition.name)) {
-          allSpells.set(spell.definition.name, spell);
+        const key = `${spell.definition?.name}|${spell.definition?.isLegacy ? "L" : "N"}`;
+        if (spell.definition?.name && !allSpells.has(key)) {
+          allSpells.set(key, spell);
         }
       }
     } catch {
@@ -184,8 +186,9 @@ async function loadSpellCompendium(client: DdbClient): Promise<DdbSpell[]> {
       );
 
       for (const spell of preparedCantrips ?? []) {
-        if (spell.definition?.name && !allSpells.has(spell.definition.name)) {
-          allSpells.set(spell.definition.name, spell);
+        const key = `${spell.definition?.name}|${spell.definition?.isLegacy ? "L" : "N"}`;
+        if (spell.definition?.name && !allSpells.has(key)) {
+          allSpells.set(key, spell);
         }
       }
     } catch {
@@ -201,8 +204,9 @@ async function loadSpellCompendium(client: DdbClient): Promise<DdbSpell[]> {
       );
 
       for (const spell of preparedSpells ?? []) {
-        if (spell.definition?.name && !allSpells.has(spell.definition.name)) {
-          allSpells.set(spell.definition.name, spell);
+        const key = `${spell.definition?.name}|${spell.definition?.isLegacy ? "L" : "N"}`;
+        if (spell.definition?.name && !allSpells.has(key)) {
+          allSpells.set(key, spell);
         }
       }
     } catch {
@@ -268,6 +272,16 @@ export async function searchSpells(
     );
   }
 
+  // Collapse 2014/2024 duplicates to one row per name (prefer the 2024 variant).
+  const byName = new Map<string, DdbSpell>();
+  for (const s of matchedSpells) {
+    const existing = byName.get(s.definition.name);
+    if (!existing || (existing.definition.isLegacy && !s.definition.isLegacy)) {
+      byName.set(s.definition.name, s);
+    }
+  }
+  matchedSpells = Array.from(byName.values());
+
   // Sort by level then name
   matchedSpells.sort((a, b) => {
     if (a.definition.level !== b.definition.level) return a.definition.level - b.definition.level;
@@ -303,7 +317,7 @@ export async function searchSpells(
  */
 export async function getSpell(
   client: DdbClient,
-  params: { spellName: string },
+  params: { spellName: string; edition?: "2014" | "2024" },
   _characterIds?: number[]
 ): Promise<ToolResult> {
   const searchName = params.spellName.toLowerCase();
@@ -315,22 +329,27 @@ export async function getSpell(
     return { content: [{ type: "text", text: message }] };
   }
 
-  // Exact match first, then partial
-  let spell = allSpells.find(
-    (s) => s.definition.name.toLowerCase() === searchName
-  );
-  if (!spell) {
-    spell = allSpells.find(
-      (s) => s.definition.name.toLowerCase().includes(searchName)
-    );
-  }
+  // Candidate matches: exact name first, else partial. A spell can have both a
+  // 2014 (isLegacy) and a 2024 variant, so there may be more than one.
+  const exact = allSpells.filter((s) => s.definition.name.toLowerCase() === searchName);
+  const candidates = exact.length > 0
+    ? exact
+    : allSpells.filter((s) => s.definition.name.toLowerCase().includes(searchName));
 
-  if (!spell) {
+  if (candidates.length === 0) {
     return {
       content: [
         { type: "text", text: `Spell "${params.spellName}" not found in the compendium.` },
       ],
     };
+  }
+
+  // Pick the variant matching the requested edition (2024 = non-legacy, 2014 =
+  // legacy); fall back to whatever exists if only one edition is present.
+  let spell = candidates[0];
+  if (params.edition) {
+    const wantLegacy = params.edition === "2014";
+    spell = candidates.find((s) => Boolean(s.definition.isLegacy) === wantLegacy) ?? candidates[0];
   }
 
   return formatSpellDetails(spell);

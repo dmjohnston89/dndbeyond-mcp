@@ -221,3 +221,32 @@ describe("getSpell", () => {
     expect(result.content[0].text).toContain("# Fireball");
   });
 });
+
+describe("getSpell edition selection", () => {
+  let mc: DdbClient;
+
+  beforeEach(() => {
+    const cw2014 = createMockSpell("Cure Wounds", 1, "Evocation");
+    cw2014.definition.isLegacy = true;
+    cw2014.definition.description = "Legacy cure restores 1d8 hit points.";
+    const cw2024 = createMockSpell("Cure Wounds", 1, "Evocation");
+    cw2024.definition.isLegacy = false;
+    cw2024.definition.description = "Modern cure restores 2d8 hit points.";
+    mc = {
+      get: vi.fn().mockResolvedValue([cw2014, cw2024]),
+      getRaw: vi.fn(),
+    } as unknown as DdbClient;
+  });
+
+  it("returns the 2024 (non-legacy) variant for edition 2024", async () => {
+    const result = await getSpell(mc, { spellName: "Cure Wounds", edition: "2024" });
+    expect(result.content[0].text).toContain("Modern cure restores 2d8");
+    expect(result.content[0].text).not.toContain("Legacy cure");
+  });
+
+  it("returns the 2014 (legacy) variant for edition 2014", async () => {
+    const result = await getSpell(mc, { spellName: "Cure Wounds", edition: "2014" });
+    expect(result.content[0].text).toContain("Legacy cure restores 1d8");
+    expect(result.content[0].text).not.toContain("Modern cure");
+  });
+});
