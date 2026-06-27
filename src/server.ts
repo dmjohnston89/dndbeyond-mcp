@@ -827,10 +827,15 @@ export async function startServer(): Promise<void> {
       conditionName: z
         .string()
         .describe("The condition name (e.g., blinded, charmed, frightened)"),
+      edition: z
+        .enum(["2014", "2024"])
+        .optional()
+        .describe("Rules edition (default 2014)"),
     },
     async (params) =>
       getCondition(client, {
         conditionName: params.conditionName,
+        edition: params.edition,
       })
   );
 
