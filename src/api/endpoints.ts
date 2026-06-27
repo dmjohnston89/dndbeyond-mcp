@@ -58,10 +58,12 @@ export const ENDPOINTS = {
     classes: () => `${DDB_CHARACTER_SERVICE}/character/v5/game-data/classes`,
     races: () => `${DDB_CHARACTER_SERVICE}/character/v5/game-data/races`,
     backgrounds: () => `${DDB_CHARACTER_SERVICE}/character/v5/game-data/backgrounds`,
+    // sharingSetting=3 returns the broadest spell coverage (campaign/marketplace
+    // shared content), e.g. ~548 wizard spells vs ~126 at sharingSetting=2.
     alwaysKnownSpells: (classId: number, classLevel: number = 20) =>
-      `${DDB_CHARACTER_SERVICE}/character/v5/game-data/always-known-spells?classId=${classId}&classLevel=${classLevel}&sharingSetting=2`,
+      `${DDB_CHARACTER_SERVICE}/character/v5/game-data/always-known-spells?classId=${classId}&classLevel=${classLevel}&sharingSetting=3`,
     alwaysPreparedSpells: (classId: number, classLevel: number = 20) =>
-      `${DDB_CHARACTER_SERVICE}/character/v5/game-data/always-prepared-spells?classId=${classId}&classLevel=${classLevel}&sharingSetting=2`,
+      `${DDB_CHARACTER_SERVICE}/character/v5/game-data/always-prepared-spells?classId=${classId}&classLevel=${classLevel}&sharingSetting=3`,
     classFeatureCollection: () => `${DDB_CHARACTER_SERVICE}/character/v5/game-data/class-feature/collection`,
     racialTraitCollection: () => `${DDB_CHARACTER_SERVICE}/character/v5/game-data/racial-trait/collection`,
   },

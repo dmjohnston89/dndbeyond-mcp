@@ -118,6 +118,8 @@ export interface DdbSpell {
     componentsDescription: string | null;
     concentration: boolean;
     ritual: boolean;
+    isLegacy?: boolean; // true = 2014 (legacy) content; false = 2024
+    sourceId?: number;
   };
   prepared: boolean;
   alwaysPrepared: boolean;
