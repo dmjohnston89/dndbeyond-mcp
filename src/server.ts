@@ -830,7 +830,7 @@ export async function startServer(): Promise<void> {
       edition: z
         .enum(["2014", "2024"])
         .optional()
-        .describe("Rules edition (default 2014)"),
+        .describe("Rules edition: 2024 (current) or 2014 (legacy). Defaults to 2014."),
     },
     async (params) =>
       getCondition(client, {

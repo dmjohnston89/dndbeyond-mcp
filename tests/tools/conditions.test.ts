@@ -31,4 +31,10 @@ describe("getCondition edition selection", () => {
     const out = await text(getCondition(stub, { conditionName: "poisoned", edition: "2024" }));
     expect(out).toMatch(/disadvantage on attack rolls/i);
   });
+
+  it("resolves a partial name against the 2024 set", async () => {
+    const out = await text(getCondition(stub, { conditionName: "exhaust", edition: "2024" }));
+    expect(out).toMatch(/D20 Test/i);          // matched the 2024 Exhaustion, not 2014
+    expect(out).not.toMatch(/Level 1: Disadvantage on ability checks/);
+  });
 });
