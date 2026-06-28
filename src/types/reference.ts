@@ -16,6 +16,7 @@ export interface MonsterSearchParams {
   page?: number;
   showHomebrew?: boolean;
   source?: string;
+  edition?: "2014" | "2024";
 }
 
 export interface ItemSearchParams {

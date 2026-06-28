@@ -733,6 +733,10 @@ export async function startServer(): Promise<void> {
         .string()
         .optional()
         .describe("Source book name (e.g., 'Monster Manual', 'Volo's Guide')"),
+      edition: z
+        .enum(["2014", "2024"])
+        .optional()
+        .describe("Rules edition to prefer: 2024 (current) or 2014 (legacy). Collapses cross-edition duplicates."),
     },
     async (params) =>
       searchMonsters(client, {
@@ -743,6 +747,7 @@ export async function startServer(): Promise<void> {
         page: params.page,
         showHomebrew: params.showHomebrew,
         source: params.source,
+        edition: params.edition,
       })
   );
 
@@ -751,10 +756,15 @@ export async function startServer(): Promise<void> {
     "Get full stat block for a specific monster by name",
     {
       monsterName: z.string().describe("The monster name"),
+      edition: z
+        .enum(["2014", "2024"])
+        .optional()
+        .describe("Rules edition to prefer: 2024 (current) or 2014 (legacy). Selects the matching variant when both exist."),
     },
     async (params) =>
       getMonster(client, {
         monsterName: params.monsterName,
+        edition: params.edition,
       })
   );
 

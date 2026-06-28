@@ -451,6 +451,55 @@ function abilityMod(score: number): string {
   return mod >= 0 ? `+${mod}` : `${mod}`;
 }
 
+/** A monster-ish record carrying DDB's legacy flag. */
+export type EditionRanked = {
+  name: string;
+  /** Optional so plain test stubs may omit it; treated as non-legacy (2024) when absent. */
+  isLegacy?: boolean;
+};
+
+/**
+ * Pick the variant matching the requested edition (2024 = non-legacy, 2014 =
+ * legacy); fall back to the first candidate when no edition is given or none match.
+ * Mirrors getSpell's variant selection.
+ */
+export function pickByEdition<T extends EditionRanked>(
+  candidates: T[],
+  edition?: "2014" | "2024",
+): T {
+  if (!edition) return candidates[0];
+  const wantLegacy = edition === "2014";
+  return candidates.find((c) => Boolean(c.isLegacy) === wantLegacy) ?? candidates[0];
+}
+
+/**
+ * Collapse same-name cross-edition duplicates to one row per name, preferring the
+ * requested edition's variant (keeping single-edition monsters as-is). Preserves
+ * first-seen name order. Returns the input unchanged when no edition is given.
+ */
+export function collapseByEdition<T extends EditionRanked>(
+  monsters: T[],
+  edition?: "2014" | "2024",
+): T[] {
+  if (!edition) return monsters;
+  const byName = new Map<string, T[]>();
+  for (const m of monsters) {
+    const key = m.name.toLowerCase();
+    const arr = byName.get(key);
+    if (arr) arr.push(m);
+    else byName.set(key, [m]);
+  }
+  const out: T[] = [];
+  const seen = new Set<string>();
+  for (const m of monsters) {
+    const key = m.name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(pickByEdition(byName.get(key)!, edition));
+  }
+  return out;
+}
+
 /**
  * Search for monsters by name.
  * When CR/type/size filters are provided without a name search, fetches multiple pages
@@ -531,6 +580,9 @@ export async function searchMonsters(
     });
   }
 
+  // Edition: collapse cross-edition duplicates to the selected edition.
+  monsters = collapseByEdition(monsters, params.edition);
+
   if (monsters.length === 0) {
     const hint = shouldPaginate
       ? "\n\nNote: CR/type/size filters were applied to a limited dataset. For best results, combine filters with a name search term."
@@ -556,9 +608,12 @@ export async function searchMonsters(
     const typeName = typeMap.get(m.typeId) ?? "Unknown";
     const sizeName = SIZE_MAP[m.sizeId] ?? "Unknown";
     const homebrewTag = m.isHomebrew ? " [Homebrew]" : "";
-
+    const editionTag =
+      params.edition && Boolean(m.isLegacy) !== (params.edition === "2014")
+        ? m.isLegacy ? " [2014]" : " [2024]"
+        : "";
     lines.push(
-      `- **${m.name}**${homebrewTag} — CR ${crStr}, ${sizeName} ${typeName}, AC ${m.armorClass}, ${m.averageHitPoints} HP${m.isLegendary ? " ★" : ""}`
+      `- **${m.name}**${homebrewTag}${editionTag} — CR ${crStr}, ${sizeName} ${typeName}, AC ${m.armorClass}, ${m.averageHitPoints} HP${m.isLegendary ? " ★" : ""}`
     );
   }
 
@@ -572,10 +627,10 @@ export async function searchMonsters(
  */
 export async function getMonster(
   client: DdbClient,
-  params: { monsterName: string }
+  params: { monsterName: string; edition?: "2014" | "2024" }
 ): Promise<ToolResult> {
-  // Search for the monster by name
-  const searchUrl = ENDPOINTS.monster.search(params.monsterName, 0, 5);
+  // Search for the monster by name — fetch up to 10 so both edition variants are present
+  const searchUrl = ENDPOINTS.monster.search(params.monsterName, 0, 10);
   const searchCacheKey = `monsters:search:${params.monsterName.toLowerCase()}`;
   const searchResponse = await client.getRaw<MonsterServiceResponse>(searchUrl, searchCacheKey, 86_400_000);
 
@@ -585,14 +640,11 @@ export async function getMonster(
     };
   }
 
-  // Find best match (exact first, then partial)
+  // Pick the edition-matching variant among same-name candidates (exact name first).
   const searchName = params.monsterName.toLowerCase();
-  let monster = searchResponse.data.find(
-    (m) => m.name.toLowerCase() === searchName
-  );
-  if (!monster) {
-    monster = searchResponse.data[0];
-  }
+  const exact = searchResponse.data.filter((m) => m.name.toLowerCase() === searchName);
+  const candidates = exact.length > 0 ? exact : searchResponse.data;
+  const monster = pickByEdition(candidates, params.edition);
 
   // Fetch full details by ID
   const detailUrl = ENDPOINTS.monster.get(monster.id);
