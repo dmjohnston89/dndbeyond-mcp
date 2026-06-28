@@ -3,24 +3,23 @@ import { searchRaces, searchBackgrounds } from "../../src/tools/reference.js";
 import { DdbClient } from "../../src/api/client.js";
 import { RaceSearchParams, BackgroundSearchParams } from "../../src/types/reference.js";
 
+// The live game-data/races endpoint returns objects keyed by fullName/baseName,
+// not name (see searchRaces in src/tools/reference.ts and commit b67d04f).
 const MOCK_RACES = [
   {
-    id: 1,
-    name: "Human",
+    fullName: "Human",
     description: "Humans are the most adaptable and ambitious people among the common races.",
     isHomebrew: false,
     sources: [{ sourceId: 1 }],
   },
   {
-    id: 2,
-    name: "Elf",
+    fullName: "Elf",
     description: "Elves are a magical people of otherworldly grace, living in the world but not entirely part of it.",
     isHomebrew: false,
     sources: [{ sourceId: 1 }],
   },
   {
-    id: 3,
-    name: "Half-Elf",
+    fullName: "Half-Elf",
     description: "Half-elves combine what some say are the best qualities of their elf and human parents.",
     isHomebrew: false,
     sources: [{ sourceId: 1 }],
