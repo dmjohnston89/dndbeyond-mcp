@@ -245,6 +245,68 @@ describe("searchMonsters", () => {
   });
 });
 
+function monsterVariant(over: Partial<typeof MOCK_MONSTER> & { id: number; name: string; isLegacy: boolean }) {
+  return { ...MOCK_MONSTER, ...over };
+}
+
+describe("searchMonsters edition", () => {
+  it("collapses cross-edition duplicates and tags only the other-edition rows", async () => {
+    const data = [
+      monsterVariant({ id: 1, name: "Goblin", isLegacy: true }),
+      monsterVariant({ id: 2, name: "Goblin", isLegacy: false }),
+      monsterVariant({ id: 3, name: "Owlbear", isLegacy: true }),
+    ];
+    const mc = createRoutingMockClient([
+      { accessType: {}, pagination: { take: 20, skip: 0, currentPage: 1, pages: 1, total: 3 }, data },
+    ]);
+    const result = await searchMonsters(mc, { name: "g", edition: "2024" });
+    const text = result.content[0].text;
+    expect(text.match(/\*\*Goblin\*\*/g)).toHaveLength(1);
+    expect(text).not.toMatch(/\*\*Goblin\*\* \[2014\]/);
+    expect(text).toMatch(/\*\*Owlbear\*\* \[2014\]/);
+  });
+
+  it("leaves results unchanged when edition is omitted", async () => {
+    const data = [
+      monsterVariant({ id: 1, name: "Goblin", isLegacy: true }),
+      monsterVariant({ id: 2, name: "Goblin", isLegacy: false }),
+    ];
+    const mc = createRoutingMockClient([
+      { accessType: {}, pagination: { take: 20, skip: 0, currentPage: 1, pages: 1, total: 2 }, data },
+    ]);
+    const result = await searchMonsters(mc, { name: "goblin" });
+    expect(result.content[0].text.match(/\*\*Goblin\*\*/g)).toHaveLength(2);
+  });
+});
+
+describe("getMonster edition", () => {
+  it("fetches the detail for the edition-matching variant", async () => {
+    const search = {
+      accessType: {},
+      pagination: { take: 5, skip: 0, currentPage: 1, pages: 1, total: 2 },
+      data: [
+        monsterVariant({ id: 11, name: "Goblin", isLegacy: true }),
+        monsterVariant({ id: 22, name: "Goblin", isLegacy: false }),
+      ],
+    };
+    const detail = { data: monsterVariant({ id: 22, name: "Goblin", isLegacy: false }) };
+    const urls: string[] = [];
+    const getRaw = vi.fn(async (url: string) => {
+      urls.push(url);
+      if (url.includes("config")) return MOCK_CONFIG;       // getGameConfig during render
+      if (url.includes("22")) return detail;                 // detail fetch for the 2024 variant
+      if (url.includes("11")) return { data: monsterVariant({ id: 11, name: "Goblin", isLegacy: true }) };
+      return search;                                         // the by-name search
+    });
+    const mc = { get: vi.fn(), getRaw } as unknown as DdbClient;
+
+    await getMonster(mc, { monsterName: "Goblin", edition: "2024" });
+    const nonConfig = urls.filter((u) => !u.includes("config"));
+    expect(nonConfig.some((u) => u.includes("22"))).toBe(true);
+    expect(nonConfig.some((u) => u.includes("11"))).toBe(false);
+  });
+});
+
 describe("getMonster", () => {
   it("shouldReturnNotFoundMessageWhenMonsterDoesNotExist", async () => {
     const mockClient = createRoutingMockClient([
