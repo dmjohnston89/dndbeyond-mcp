@@ -115,8 +115,6 @@ Released as annotated tags (dndtools pins one by tag):
 - **`v0.3.0`** — Edition-aware **monster search + lookup**: `search_monsters` / `get_monster` resolve the requested edition via D&D Beyond's `isLegacy` flag — preferring the selected edition, collapsing cross-edition duplicate names, and keeping/tagging other-edition-only results. Mirrors the existing `get_spell` edition handling.
 - **`v0.4.0`** — `check_auth` is now a **real session-liveness probe**: it performs a cobalt-token exchange against D&D Beyond rather than only checking whether a config file exists, so callers can detect an expired-but-present cookie.
 
-> **Known issue (pre-existing, surfaced during the v0.4.0 work):** `searchRaces` returns no results (4 failing tests). Unrelated to the edition/auth changes above; not yet investigated.
-
 ## Security
 
 This server stores your D&D Beyond session cookie locally at `~/.dndbeyond-mcp/config.json`. The cookie provides full access to your D&D Beyond account. Never share this file. The server only communicates with `dndbeyond.com` domains.
