@@ -1,5 +1,5 @@
 import { DdbClient } from "../api/client.js";
-import { SpellSearchParams, MonsterSearchParams, ItemSearchParams, FeatSearchParams, RaceSearchParams, BackgroundSearchParams, ClassFeatureSearchParams, RacialTraitSearchParams } from "../types/reference.js";
+import { SpellSearchParams, MonsterSearchParams, ItemSearchParams, FeatSearchParams, ClassSearchParams, RaceSearchParams, BackgroundSearchParams, ClassFeatureSearchParams, RacialTraitSearchParams, SubclassSearchParams, Edition } from "../types/reference.js";
 import { DdbCharacter, DdbSpell } from "../types/character.js";
 import { ENDPOINTS } from "../api/endpoints.js";
 
@@ -17,7 +17,7 @@ interface GameConfig {
   alignments: Array<{ id: number; name: string }>;
   damageTypes: Array<{ id: number; name: string }>;
   senses: Array<{ id: number; name: string }>;
-  sources?: Array<{ id: number; name: string }>;
+  sources?: Array<{ id: number; name: string; description?: string; sourceCategoryId?: number }>;
   damageAdjustments: Array<{ id: number; name: string; type: number }>;
 }
 
@@ -64,10 +64,34 @@ async function getGameConfig(client: DdbClient): Promise<GameConfig> {
   return cachedConfig;
 }
 
+/**
+ * Like getGameConfig, but swallows fetch failures. Classes, backgrounds, feats,
+ * class features, and racial traits only need config for optional edition
+ * tagging/derivation (source-category lookup) — not to fetch their own data — so
+ * if the config endpoint is unreachable those searches should still return
+ * results (just without edition tags) rather than fail outright.
+ */
+async function getGameConfigSafe(client: DdbClient): Promise<GameConfig | undefined> {
+  try {
+    return await getGameConfig(client);
+  } catch {
+    return undefined;
+  }
+}
+
 function resolveSourceId(config: GameConfig, source?: string): number | undefined {
   if (!source) return undefined;
   const q = source.toLowerCase().trim();
-  const fromConfig = config.sources?.find((s) => s.name.toLowerCase().includes(q) || q.includes(s.name.toLowerCase()));
+  // Match against both the short code D&D Beyond's config uses for `name`
+  // (e.g. "PHB", "TCoE") and its full-title `description` (e.g. "Tasha's
+  // Cauldron of Everything") — a caller passing the book's real title, not
+  // its internal abbreviation, would otherwise never match anything here.
+  const fromConfig = config.sources?.find(
+    (s) =>
+      s.name.toLowerCase().includes(q) ||
+      q.includes(s.name.toLowerCase()) ||
+      s.description?.toLowerCase().includes(q)
+  );
   if (fromConfig) return fromConfig.id;
   return SOURCE_MAP[q];
 }
@@ -131,12 +155,19 @@ interface DdbMonster {
 // Class IDs for building the full spell compendium
 const SPELLCASTING_CLASS_IDS = [1, 2, 3, 4, 5, 6, 7, 8]; // Bard through Wizard
 
+// D7a: the single named interception point for "what edition do we show when
+// the caller doesn't say?" — today a constant equal to every other tool's
+// implicit default; a future config-driven per-user preference (see
+// docs/design/2026-08-26-edition-preference-design.md) only has to change
+// this one spot instead of every `?? "2024"` call site.
+const DEFAULT_EDITION: Edition = "2024";
+
 /**
  * Loads the full spell compendium by querying always-known-spells and always-prepared-spells for all classes.
  * Queries both classLevel=1 (for cantrips/level 0 spells) and classLevel=20 (for levels 1-9).
  * Deduplicates by spell definition name.
  */
-async function loadSpellCompendium(client: DdbClient): Promise<DdbSpell[]> {
+async function loadSpellCompendium(client: DdbClient, campaignId?: number): Promise<DdbSpell[]> {
   const allSpells = new Map<string, DdbSpell>();
   let failureCount = 0;
   const totalRequests = SPELLCASTING_CLASS_IDS.length * 4; // 2 for known, 2 for prepared
@@ -145,8 +176,8 @@ async function loadSpellCompendium(client: DdbClient): Promise<DdbSpell[]> {
     // Fetch cantrips (level 0) by querying at classLevel=1
     try {
       const cantrips = await client.get<DdbSpell[]>(
-        ENDPOINTS.gameData.alwaysKnownSpells(classId, 1),
-        `spell-compendium:class:${classId}:cantrips`,
+        ENDPOINTS.gameData.alwaysKnownSpells(classId, 1, campaignId),
+        campaignCacheKey(`spell-compendium:class:${classId}:cantrips`, campaignId),
         86_400_000, // 24h
       );
 
@@ -163,8 +194,8 @@ async function loadSpellCompendium(client: DdbClient): Promise<DdbSpell[]> {
     // Fetch higher-level spells (levels 1-9) by querying at classLevel=20
     try {
       const spells = await client.get<DdbSpell[]>(
-        ENDPOINTS.gameData.alwaysKnownSpells(classId, 20),
-        `spell-compendium:class:${classId}`,
+        ENDPOINTS.gameData.alwaysKnownSpells(classId, 20, campaignId),
+        campaignCacheKey(`spell-compendium:class:${classId}`, campaignId),
         86_400_000, // 24h
       );
 
@@ -181,8 +212,8 @@ async function loadSpellCompendium(client: DdbClient): Promise<DdbSpell[]> {
     // Fetch always-prepared cantrips (level 0) by querying at classLevel=1
     try {
       const preparedCantrips = await client.get<DdbSpell[]>(
-        ENDPOINTS.gameData.alwaysPreparedSpells(classId, 1),
-        `spell-compendium:class:${classId}:prepared-cantrips`,
+        ENDPOINTS.gameData.alwaysPreparedSpells(classId, 1, campaignId),
+        campaignCacheKey(`spell-compendium:class:${classId}:prepared-cantrips`, campaignId),
         86_400_000, // 24h
       );
 
@@ -199,8 +230,8 @@ async function loadSpellCompendium(client: DdbClient): Promise<DdbSpell[]> {
     // Fetch always-prepared spells (levels 1-9) by querying at classLevel=20
     try {
       const preparedSpells = await client.get<DdbSpell[]>(
-        ENDPOINTS.gameData.alwaysPreparedSpells(classId, 20),
-        `spell-compendium:class:${classId}:prepared`,
+        ENDPOINTS.gameData.alwaysPreparedSpells(classId, 20, campaignId),
+        campaignCacheKey(`spell-compendium:class:${classId}:prepared`, campaignId),
         86_400_000, // 24h
       );
 
@@ -223,6 +254,17 @@ async function loadSpellCompendium(client: DdbClient): Promise<DdbSpell[]> {
 }
 
 /**
+ * Projects a DdbSpell into the shape collapseByEdition/pickByEdition need —
+ * both operate on top-level `name`/`isLegacy`, but DdbSpell nests both under
+ * `.definition`. Returns a new object (rather than mutating the input) since
+ * DdbSpell instances here come from the shared TTL cache and may be reused
+ * across calls.
+ */
+function asEditionRanked(spell: DdbSpell): DdbSpell & EditionRanked {
+  return { ...spell, name: spell.definition.name, isLegacy: spell.definition.isLegacy };
+}
+
+/**
  * Searches for spells matching the given parameters.
  * Uses the full spell compendium from always-known-spells endpoints.
  */
@@ -233,7 +275,7 @@ export async function searchSpells(
 ): Promise<ToolResult> {
   let allSpells: DdbSpell[];
   try {
-    allSpells = await loadSpellCompendium(client);
+    allSpells = await loadSpellCompendium(client, params.campaignId);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to load spell compendium";
     return { content: [{ type: "text", text: message }] };
@@ -273,15 +315,12 @@ export async function searchSpells(
     );
   }
 
-  // Collapse 2014/2024 duplicates to one row per name (prefer the 2024 variant).
-  const byName = new Map<string, DdbSpell>();
-  for (const s of matchedSpells) {
-    const existing = byName.get(s.definition.name);
-    if (!existing || (existing.definition.isLegacy && !s.definition.isLegacy)) {
-      byName.set(s.definition.name, s);
-    }
-  }
-  matchedSpells = Array.from(byName.values());
+  // Collapse 2014/2024 duplicates to one row per name, preferring the
+  // requested edition — or DEFAULT_EDITION when none is given, which
+  // preserves the old hardcoded "always prefer 2024" behavior rather than
+  // regressing to collapseByEdition's no-op-when-undefined default (that
+  // would resurrect duplicate same-name rows for every unfiltered search).
+  matchedSpells = collapseByEdition(matchedSpells.map(asEditionRanked), params.edition ?? DEFAULT_EDITION);
 
   // Sort by level then name
   matchedSpells.sort((a, b) => {
@@ -302,9 +341,15 @@ export async function searchSpells(
     if (spell.definition.concentration) tags.push("Concentration");
     if (spell.definition.ritual) tags.push("Ritual");
     const tagStr = tags.length > 0 ? ` (${tags.join(", ")})` : "";
+    // Same DEFAULT_EDITION fallback as the collapse above: with no edition
+    // requested, a spell that only exists pre-2024 had to fall back to its
+    // 2014 variant during the collapse, so it's tagged here — new
+    // information the old hand-rolled collapse never surfaced, not a
+    // regression (see D1 in the PR #12 review-response plan).
+    const editionTag = editionSuffix(spell.definition.isLegacy, params.edition ?? DEFAULT_EDITION);
 
     lines.push(
-      `- **${spell.definition.name}** — ${level}, ${spell.definition.school}${tagStr}`
+      `- **${spell.definition.name}**${editionTag} — ${level}, ${spell.definition.school}${tagStr}`
     );
   }
 
@@ -318,13 +363,13 @@ export async function searchSpells(
  */
 export async function getSpell(
   client: DdbClient,
-  params: { spellName: string; edition?: "2014" | "2024" },
+  params: { spellName: string; edition?: Edition; campaignId?: number },
   _characterIds?: number[]
 ): Promise<ToolResult> {
   const searchName = params.spellName.toLowerCase();
   let allSpells: DdbSpell[];
   try {
-    allSpells = await loadSpellCompendium(client);
+    allSpells = await loadSpellCompendium(client, params.campaignId);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to load spell compendium";
     return { content: [{ type: "text", text: message }] };
@@ -347,11 +392,7 @@ export async function getSpell(
 
   // Pick the variant matching the requested edition (2024 = non-legacy, 2014 =
   // legacy); fall back to whatever exists if only one edition is present.
-  let spell = candidates[0];
-  if (params.edition) {
-    const wantLegacy = params.edition === "2014";
-    spell = candidates.find((s) => Boolean(s.definition.isLegacy) === wantLegacy) ?? candidates[0];
-  }
+  const spell = pickByEdition(candidates.map(asEditionRanked), params.edition);
 
   return formatSpellDetails(spell);
 }
@@ -409,7 +450,7 @@ function formatSpellDetails(spell: DdbSpell): ToolResult {
   const tagStr = tags.length > 0 ? ` (${tags.join(", ")})` : "";
 
   const lines = [
-    `# ${def.name}`,
+    `# ${def.name}${editionHeaderLabel(def.isLegacy)}`,
     `*${level} ${def.school}${tagStr}*\n`,
     `**Casting Time:** ${castingTime}`,
     `**Range:** ${range}`,
@@ -461,15 +502,25 @@ export type EditionRanked = {
 
 /**
  * Pick the variant matching the requested edition (2024 = non-legacy, 2014 =
- * legacy); fall back to the first candidate when no edition is given or none match.
- * Mirrors getSpell's variant selection.
+ * legacy); fall back to the first candidate when none match. Mirrors getSpell's
+ * variant selection.
+ *
+ * When no edition is given, falls back to DEFAULT_EDITION rather than
+ * `candidates[0]` — every one of this function's callers is a singular get_*
+ * detail lookup (getSpell, getMonster, getItem, getFeat, getClass, getRace,
+ * getBackground) that must return exactly one entity, so an unrequested
+ * edition used to resolve to whatever order the API happened to return
+ * candidates in — frequently the 2014 variant — rather than the same 2024
+ * default every other edition-aware tool (search_*, get_condition) already
+ * uses. Confirmed via the 2026-09-01 edition-awareness test suite (see
+ * docs/plans/2026-08-31-edition-awareness-test-plan.md) as a HIGH-severity,
+ * cross-tool-inconsistent defect.
  */
 export function pickByEdition<T extends EditionRanked>(
   candidates: T[],
-  edition?: "2014" | "2024",
+  edition?: Edition,
 ): T {
-  if (!edition) return candidates[0];
-  const wantLegacy = edition === "2014";
+  const wantLegacy = (edition ?? DEFAULT_EDITION) === "2014";
   return candidates.find((c) => Boolean(c.isLegacy) === wantLegacy) ?? candidates[0];
 }
 
@@ -480,7 +531,7 @@ export function pickByEdition<T extends EditionRanked>(
  */
 export function collapseByEdition<T extends EditionRanked>(
   monsters: T[],
-  edition?: "2014" | "2024",
+  edition?: Edition,
 ): T[] {
   if (!edition) return monsters;
   const byName = new Map<string, T[]>();
@@ -499,6 +550,115 @@ export function collapseByEdition<T extends EditionRanked>(
     out.push(pickByEdition(byName.get(key)!, edition));
   }
   return out;
+}
+
+// D&D Beyond source-category IDs that distinguish 2014 ("5e") rulebooks from 2024
+// ("5.5e") ones — see the `sourceCategories` list at /api/config/json.
+const LEGACY_SOURCE_CATEGORY_IDS = new Set([1, 23, 26]); // 5e Expanded Rules, Legacy/Noncore, 5e Core Rules
+// The current-edition counterparts. A source landing in neither set (homebrew,
+// campaign settings, Critical Role, etc.) is a *recognized* source that just
+// isn't tied to a specific edition — that's still a confident "false" below,
+// distinct from not being able to determine anything at all.
+const CURRENT_SOURCE_CATEGORY_IDS = new Set([24, 38]); // 5.5e Core Rules, 5.5e Expanded Rules
+
+/**
+ * Derives 2014-vs-2024 edition status from an entity's primary source book, for
+ * entity types (classes, backgrounds, feats, ...) whose game-data payload doesn't
+ * carry an explicit `isLegacy` flag the way monsters/items/races/spells do.
+ *
+ * Returns `undefined` — genuinely unknown, not "assume 2024" — whenever the
+ * question can't actually be answered: the config fetch failed, the config
+ * omits its `sources` list, or the entity's source isn't among the ones config
+ * knows about. Only returns a real `boolean` once the source is recognized:
+ * `true`/`false` for the two edition-tied category sets, `false` for a
+ * recognized source outside both (it's confidently not edition-specific, which
+ * is a different fact than "we don't know"). Callers must not coerce this
+ * result with `Boolean()` — that silently turns "unknown" into "2024" again,
+ * which is exactly the bug this tri-state exists to avoid; use it as-is (or
+ * via editionHeaderLabel/editionSuffix, which handle all three states).
+ */
+export function isLegacyBySource(config: GameConfig | undefined, sources?: Array<{ sourceId: number }>): boolean | undefined {
+  const sourceId = sources?.[0]?.sourceId;
+  if (sourceId === undefined) return undefined;
+  if (!config?.sources) return undefined;
+  const categoryId = config.sources.find((s) => s.id === sourceId)?.sourceCategoryId;
+  if (categoryId === undefined) return undefined;
+  if (LEGACY_SOURCE_CATEGORY_IDS.has(categoryId)) return true;
+  if (CURRENT_SOURCE_CATEGORY_IDS.has(categoryId)) return false;
+  return false; // Recognized source, but not tied to either edition.
+}
+
+/**
+ * Annotates entities that carry a `sources` list (but no native `isLegacy` field)
+ * with a computed `isLegacy` flag, making them usable with pickByEdition /
+ * collapseByEdition just like monsters, items, races, and spells. `isLegacy` is
+ * `undefined` (not a coerced `false`) whenever isLegacyBySource couldn't
+ * determine it — see its doc comment.
+ */
+function withLegacyFlag<T extends { sources?: Array<{ sourceId: number }> }>(
+  config: GameConfig | undefined,
+  items: T[],
+): (T & { isLegacy: boolean | undefined })[] {
+  return items.map((item) => ({ ...item, isLegacy: isLegacyBySource(config, item.sources) }));
+}
+
+/**
+ * Formats an edition-indicator suffix for a list row. `isLegacy === undefined`
+ * (edition genuinely undetermined — see isLegacyBySource) always renders
+ * "[edition unknown]", regardless of whether an edition was requested: a
+ * confident-looking [2014]/[2024] tag here would be worse than no tag, since
+ * the row's true edition is not actually known. Otherwise: with no edition
+ * requested, legacy entries are tagged "(Legacy)" so same-name 2014/2024 rows
+ * (e.g. two "Fighter" classes) stay distinguishable; with an edition
+ * requested, results have already been collapsed to one row per name, so the
+ * tag only appears when that row had to fall back to the other edition
+ * because no matching variant exists.
+ */
+function editionSuffix(isLegacy: boolean | undefined, edition?: Edition): string {
+  if (isLegacy === undefined) return " [edition unknown]";
+  if (edition) {
+    // isLegacy is already a real boolean here (not undefined), so this
+    // Boolean() is just documenting the comparison's intent, not coercing
+    // away a missing value.
+    return Boolean(isLegacy) !== (edition === "2014") ? (isLegacy ? " [2014]" : " [2024]") : "";
+  }
+  return isLegacy ? " *(Legacy)*" : "";
+}
+
+/**
+ * Formats the "*(2014)*"/"*(2024)*"/"*(edition undetermined)*" header suffix
+ * shared by every get_* detail handler (getClass, getFeat, getSubclass,
+ * getRace, getBackground, getCondition, and — per D4 — getItem/getMonster/
+ * getSpell), so a caller can always tell which variant `pickByEdition` (or the
+ * hardcoded getCondition table) actually handed them, instead of assuming.
+ */
+function editionHeaderLabel(isLegacy: boolean | undefined): string {
+  if (isLegacy === undefined) return " *(edition undetermined)*";
+  return isLegacy ? " *(2014)*" : " *(2024)*";
+}
+
+/**
+ * The one-line note appended to a result when the caller asked to filter/tag
+ * by edition but the shared game config was unreachable, so isLegacyBySource
+ * couldn't resolve anything for this call — every row would otherwise carry
+ * an unexplained "[edition unknown]" tag with no stated cause.
+ */
+function configUnavailableNote(config: GameConfig | undefined, edition: Edition | undefined): string {
+  return config === undefined && edition !== undefined
+    ? "\n\n*Edition could not be determined — D&D Beyond's config endpoint was unreachable, so edition filtering was not applied.*"
+    : "";
+}
+
+/**
+ * Appends a campaign suffix to a cache key when campaignId is set. Required
+ * whenever an endpoint's result depends on campaignId — content shared via
+ * one campaign differs from another campaign's or from the account's own
+ * unscoped view, so reusing a plain (non-campaign) cache key across calls
+ * with different campaignId values would serve stale/wrong cross-campaign
+ * data from cache.
+ */
+function campaignCacheKey(base: string, campaignId?: number): string {
+  return campaignId ? `${base}:campaign:${campaignId}` : base;
 }
 
 /**
@@ -609,10 +769,10 @@ export async function searchMonsters(
     const typeName = typeMap.get(m.typeId) ?? "Unknown";
     const sizeName = SIZE_MAP[m.sizeId] ?? "Unknown";
     const homebrewTag = m.isHomebrew ? " [Homebrew]" : "";
-    const editionTag =
-      params.edition && Boolean(m.isLegacy) !== (params.edition === "2014")
-        ? m.isLegacy ? " [2014]" : " [2024]"
-        : "";
+    // D3: was a hand-rolled ternary that (unlike every other search tool)
+    // omitted the no-edition "*(Legacy)*" tag entirely, so two same-name
+    // monsters rendered indistinguishably when no edition was requested.
+    const editionTag = editionSuffix(m.isLegacy, params.edition);
     lines.push(
       `- **${m.name}**${homebrewTag}${editionTag} — CR ${crStr}, ${sizeName} ${typeName}, AC ${m.armorClass}, ${m.averageHitPoints} HP${m.isLegendary ? " ★" : ""}`
     );
@@ -673,7 +833,7 @@ export async function getMonster(
   const alignment = alignMap.get(m.alignmentId) ?? "Unaligned";
 
   const lines: string[] = [];
-  lines.push(`# ${m.name}`);
+  lines.push(`# ${m.name}${editionHeaderLabel(m.isLegacy)}`);
   lines.push(`*${sizeName} ${typeName}, ${alignment}*\n`);
 
   lines.push(`**Armor Class** ${m.armorClass}${m.armorClassDescription ? " " + m.armorClassDescription.trim() : ""}`);
@@ -825,6 +985,23 @@ interface DdbItem {
   sources: Array<{ sourceId: number }>;
   canAttune: boolean;
   magic: boolean;
+  // Unconfirmed whether the live payload actually carries this field (see A1
+  // in the PR #12 review-response plan) — optional so a missing flag doesn't
+  // silently type-check as `false` (misclassifying every item as 2024).
+  isLegacy?: boolean;
+}
+
+/**
+ * Resolves an item's edition status: prefer D&D Beyond's native `isLegacy`
+ * flag when the payload provides one, otherwise derive it from the item's
+ * source book the same way classes/backgrounds/feats do (isLegacyBySource) —
+ * belt-and-braces, since it's unconfirmed whether `isLegacy` is reliably
+ * present on the live items payload. Only ever *fills in* a missing flag;
+ * never overrides a native `true`/`false`, which is authoritative where
+ * present (as it is for races and monsters).
+ */
+function withItemLegacyFlag(config: GameConfig | undefined, items: DdbItem[]): (DdbItem & { isLegacy: boolean | undefined })[] {
+  return items.map((item) => ({ ...item, isLegacy: item.isLegacy ?? isLegacyBySource(config, item.sources) }));
 }
 
 /**
@@ -834,14 +1011,19 @@ export async function searchItems(
   client: DdbClient,
   params: ItemSearchParams
 ): Promise<ToolResult> {
-  const cacheKey = "game-data:items";
-  const items = await client.get<DdbItem[]>(
-    ENDPOINTS.gameData.items(),
+  const cacheKey = campaignCacheKey("game-data:items", params.campaignId);
+  const itemsRaw = await client.get<DdbItem[]>(
+    ENDPOINTS.gameData.items(params.campaignId),
     cacheKey,
     86_400_000,
   );
 
-  let matched = items ?? [];
+  // Fetch config unconditionally (not just for the source-name filter below)
+  // since it also feeds the isLegacy derivation fallback — safely, so a
+  // config outage degrades to "edition unknown" rather than failing the
+  // whole search.
+  const configForEdition = await getGameConfigSafe(client);
+  let matched = withItemLegacyFlag(configForEdition, itemsRaw ?? []);
 
   if (params.name) {
     const searchName = params.name.toLowerCase();
@@ -868,6 +1050,10 @@ export async function searchItems(
     matched = id === undefined ? [] : matched.filter((i) => i.sources?.some((s) => s.sourceId === id));
   }
 
+  // Edition: collapse cross-edition duplicates (e.g. two "Bag of Holding" rows) to
+  // the selected edition.
+  matched = collapseByEdition(matched, params.edition);
+
   // Sort by name
   matched.sort((a, b) => a.name.localeCompare(b.name));
 
@@ -876,9 +1062,13 @@ export async function searchItems(
   const page = Math.max(1, params.page ?? 1);
   matched = matched.slice((page - 1) * 30, (page - 1) * 30 + 30);
 
+  const configNote = matched.some((i) => i.isLegacy === undefined)
+    ? configUnavailableNote(configForEdition, params.edition)
+    : "";
+
   if (matched.length === 0) {
     return {
-      content: [{ type: "text", text: "No items found matching the search criteria." }],
+      content: [{ type: "text", text: `No items found matching the search criteria.${configNote}` }],
     };
   }
 
@@ -887,11 +1077,12 @@ export async function searchItems(
   const lines = [`# Item Search Results (${header})\n`];
   for (const item of matched) {
     const attune = item.requiresAttunement ? " (attunement)" : "";
-    lines.push(`- **${item.name}** — ${item.rarity || "Common"} ${item.filterType || item.type || ""}${attune} [#${item.id}]`);
+    const editionTag = editionSuffix(item.isLegacy, params.edition);
+    lines.push(`- **${item.name}**${editionTag} — ${item.rarity || "Common"} ${item.filterType || item.type || ""}${attune} [#${item.id}]`);
   }
 
   return {
-    content: [{ type: "text", text: lines.join("\n") }],
+    content: [{ type: "text", text: lines.join("\n") + configNote }],
   };
 }
 
@@ -900,29 +1091,37 @@ export async function searchItems(
  */
 export async function getItem(
   client: DdbClient,
-  params: { itemName: string }
+  params: { itemName: string; edition?: Edition; campaignId?: number }
 ): Promise<ToolResult> {
-  const cacheKey = "game-data:items";
-  const items = await client.get<DdbItem[]>(
-    ENDPOINTS.gameData.items(),
+  const cacheKey = campaignCacheKey("game-data:items", params.campaignId);
+  const itemsRaw = await client.get<DdbItem[]>(
+    ENDPOINTS.gameData.items(params.campaignId),
     cacheKey,
     86_400_000,
   );
+  const configForEdition = await getGameConfigSafe(client);
+  const items = withItemLegacyFlag(configForEdition, itemsRaw ?? []);
 
   const searchName = params.itemName.toLowerCase();
-  let item = (items ?? []).find((i) => i.name.toLowerCase() === searchName);
-  if (!item) {
-    item = (items ?? []).find((i) => i.name.toLowerCase().includes(searchName));
+
+  // Gather all name matches (exact first, else substring) so we can pick the
+  // edition-correct variant instead of just taking the first hit.
+  let candidates = items.filter((i) => i.name.toLowerCase() === searchName);
+  if (candidates.length === 0) {
+    candidates = items.filter((i) => i.name.toLowerCase().includes(searchName));
   }
 
-  if (!item) {
+  if (candidates.length === 0) {
     return {
       content: [{ type: "text", text: `Item "${params.itemName}" not found.` }],
     };
   }
 
+  const item = pickByEdition(candidates, params.edition);
+
   const lines: string[] = [];
-  lines.push(`# ${item.name}`);
+  const editionLabel = editionHeaderLabel(item.isLegacy);
+  lines.push(`# ${item.name}${editionLabel}`);
   lines.push(`*${item.filterType || item.type || "Item"}, ${item.rarity || "common"}*\n`);
 
   if (item.requiresAttunement) {
@@ -940,15 +1139,34 @@ export async function getItem(
   lines.push("");
   lines.push(stripHtml(item.description || item.snippet || "No description available."));
 
+  const configNote = item.isLegacy === undefined ? configUnavailableNote(configForEdition, params.edition) : "";
   return {
-    content: [{ type: "text", text: lines.join("\n") }],
+    content: [{ type: "text", text: lines.join("\n") + configNote }],
   };
 }
 
-/** List the account's source books (id + name) as JSON, for client-side pickers. */
-export async function listSources(client: DdbClient): Promise<ToolResult> {
+/**
+ * List the account's source books (id + name) as JSON, for client-side pickers.
+ *
+ * `nameFilter` narrows the list to sources whose name contains the given text
+ * (case-insensitive) — without it, the full list runs to ~53k characters on a
+ * typical account (LOW finding from the 2026-09-01 edition-awareness test
+ * suite: callers that only needed to check ownership of one or two books were
+ * paying that full cost every time).
+ */
+export async function listSources(client: DdbClient, nameFilter?: string): Promise<ToolResult> {
   const config = await getGameConfig(client);
-  return { content: [{ type: "text", text: JSON.stringify(config.sources ?? []) }] };
+  let sources = config.sources ?? [];
+  if (nameFilter) {
+    const q = nameFilter.toLowerCase();
+    // Check both `name` (D&D Beyond's short code, e.g. "TCoE") and
+    // `description` (the full title, e.g. "Tasha's Cauldron of Everything") —
+    // see resolveSourceId's identical reasoning.
+    sources = sources.filter(
+      (s) => s.name.toLowerCase().includes(q) || s.description?.toLowerCase().includes(q)
+    );
+  }
+  return { content: [{ type: "text", text: JSON.stringify(sources) }] };
 }
 
 // --- Feat types ---
@@ -958,9 +1176,26 @@ interface DdbFeat {
   name: string;
   description: string;
   snippet: string;
-  prerequisite: string | null;
+  /** Legacy shape from older mocks/tests: a single precomputed string. */
+  prerequisite?: string | null;
+  /** Real D&D Beyond payload shape: zero or more structured prerequisite entries. */
+  prerequisites?: Array<{ description: string }>;
   isHomebrew: boolean;
   sources: Array<{ sourceId: number }>;
+  categories?: Array<{ tagName: string }>;
+}
+
+/**
+ * Normalizes a feat's prerequisite text. D&D Beyond's live payload nests it under
+ * `prerequisites[].description`; `prerequisite` (scalar) is kept for callers/tests
+ * using the older shape.
+ */
+function featPrerequisiteText(feat: DdbFeat): string | null {
+  if (feat.prerequisites && feat.prerequisites.length > 0) {
+    const text = feat.prerequisites.map((p) => p.description).filter(Boolean).join("; ");
+    if (text) return text;
+  }
+  return feat.prerequisite ?? null;
 }
 
 /**
@@ -970,14 +1205,15 @@ export async function searchFeats(
   client: DdbClient,
   params: FeatSearchParams
 ): Promise<ToolResult> {
-  const cacheKey = "game-data:feats";
+  const cacheKey = campaignCacheKey("game-data:feats", params.campaignId);
   const feats = await client.get<DdbFeat[]>(
-    ENDPOINTS.gameData.feats(),
+    ENDPOINTS.gameData.feats(params.campaignId),
     cacheKey,
     86_400_000,
   );
 
-  let matched = feats ?? [];
+  const config = await getGameConfigSafe(client);
+  let matched = withLegacyFlag(config, feats ?? []);
 
   if (params.name) {
     const searchName = params.name.toLowerCase();
@@ -986,29 +1222,84 @@ export async function searchFeats(
 
   if (params.prerequisite) {
     const searchPrereq = params.prerequisite.toLowerCase();
-    matched = matched.filter(
-      (f) => f.prerequisite?.toLowerCase().includes(searchPrereq)
-    );
+    matched = matched.filter((f) => featPrerequisiteText(f)?.toLowerCase().includes(searchPrereq));
   }
+
+  // Edition: collapse cross-edition duplicates (e.g. two "Chef" feats) to the
+  // selected edition.
+  matched = collapseByEdition(matched, params.edition);
 
   matched.sort((a, b) => a.name.localeCompare(b.name));
 
+  const configNote = configUnavailableNote(config, params.edition);
+
   if (matched.length === 0) {
     return {
-      content: [{ type: "text", text: "No feats found matching the search criteria." }],
+      content: [{ type: "text", text: `No feats found matching the search criteria.${configNote}` }],
     };
   }
 
   const lines = [`# Feat Search Results (${matched.length} found)\n`];
   for (const feat of matched) {
-    const prereq = feat.prerequisite ? ` (Prerequisite: ${feat.prerequisite})` : "";
+    const prereqText = featPrerequisiteText(feat);
+    const prereq = prereqText ? ` (Prerequisite: ${prereqText})` : "";
+    const editionTag = editionSuffix(feat.isLegacy, params.edition);
     const desc = feat.snippet || feat.description || "";
     const shortDesc = stripHtml(desc).substring(0, 80);
-    lines.push(`- **${feat.name}**${prereq} — ${shortDesc}${shortDesc.length >= 80 ? "..." : ""}`);
+    lines.push(`- **${feat.name}**${editionTag}${prereq} — ${shortDesc}${shortDesc.length >= 80 ? "..." : ""}`);
   }
 
   return {
-    content: [{ type: "text", text: lines.join("\n") }],
+    content: [{ type: "text", text: lines.join("\n") + configNote }],
+  };
+}
+
+/**
+ * Get full details for a specific feat by name.
+ */
+export async function getFeat(
+  client: DdbClient,
+  params: { featName: string; edition?: Edition; campaignId?: number }
+): Promise<ToolResult> {
+  const cacheKey = campaignCacheKey("game-data:feats", params.campaignId);
+  const feats = await client.get<DdbFeat[]>(
+    ENDPOINTS.gameData.feats(params.campaignId),
+    cacheKey,
+    86_400_000,
+  );
+
+  const config = await getGameConfigSafe(client);
+  const annotated = withLegacyFlag(config, feats ?? []);
+
+  const searchName = params.featName.toLowerCase();
+  let candidates = annotated.filter((f) => f.name.toLowerCase() === searchName);
+  if (candidates.length === 0) {
+    candidates = annotated.filter((f) => f.name.toLowerCase().includes(searchName));
+  }
+
+  if (candidates.length === 0) {
+    return {
+      content: [{ type: "text", text: `Feat "${params.featName}" not found.` }],
+    };
+  }
+
+  const feat = pickByEdition(candidates, params.edition);
+
+  const lines: string[] = [];
+  const editionLabel = editionHeaderLabel(feat.isLegacy);
+  lines.push(`# ${feat.name}${editionLabel}`);
+
+  const prereqText = featPrerequisiteText(feat);
+  if (prereqText) lines.push(`*Prerequisite: ${prereqText}*`);
+
+  const categories = feat.categories?.map((c) => c.tagName).filter(Boolean).join(", ");
+  if (categories) lines.push(`*Category: ${categories}*`);
+
+  lines.push("");
+  lines.push(stripHtml(feat.description || feat.snippet || "No description available."));
+
+  return {
+    content: [{ type: "text", text: lines.join("\n") + configUnavailableNote(config, params.edition) }],
   };
 }
 
@@ -1266,7 +1557,13 @@ export async function getCondition(
   _client: DdbClient,
   params: { conditionName: string; edition?: "2014" | "2024" }
 ): Promise<ToolResult> {
-  const set = params.edition === "2024" ? CONDITIONS_2024 : CONDITIONS;
+  // D2b: defaults to 2024, matching every other edition-aware tool's default
+  // (see the shared editionParam description) — was 2014 through v0.6.0, a
+  // deliberate but inconsistent choice that became a cross-tool trap once
+  // every other compendium entity defaulted to current. Approved as a
+  // breaking change 2026-08-28 (see the PR #12 review-response plan, D2b).
+  const isLegacy = params.edition === "2014";
+  const set = isLegacy ? CONDITIONS : CONDITIONS_2024;
   const searchName = params.conditionName.toLowerCase().trim();
   const condition = set[searchName];
 
@@ -1276,7 +1573,7 @@ export async function getCondition(
       (c) => c.name.toLowerCase().includes(searchName)
     );
     if (match) {
-      return formatConditionDetails(match);
+      return formatConditionDetails(match, isLegacy);
     }
 
     const available = Object.values(set).map((c) => c.name).join(", ");
@@ -1287,12 +1584,18 @@ export async function getCondition(
     };
   }
 
-  return formatConditionDetails(condition);
+  return formatConditionDetails(condition, isLegacy);
 }
 
-function formatConditionDetails(condition: { name: string; description: string; effects: string[] }): ToolResult {
+// D2a: label which edition's rules text this is — conditions aren't
+// API-backed (a hardcoded table, not collapseByEdition/pickByEdition), so
+// this mirrors the five get_* detail headers' *(2014)*/*(2024)* convention
+// by hand rather than sharing editionHeaderLabel, which expects a tri-state
+// (boolean | undefined) that doesn't apply here: the table selection above
+// is always a definite choice, never "undetermined".
+function formatConditionDetails(condition: { name: string; description: string; effects: string[] }, isLegacy: boolean): ToolResult {
   const lines: string[] = [];
-  lines.push(`# ${condition.name}`);
+  lines.push(`# ${condition.name} *(${isLegacy ? "2014" : "2024"})*`);
   lines.push("");
   lines.push(condition.description);
 
@@ -1317,9 +1620,12 @@ interface DdbClass {
   hitDice: number;
   isHomebrew: boolean;
   spellCastingAbilityId: number | null;
-  subclasses?: Array<{ id: number; name: string; description: string }>;
+  primaryAbilities?: number[];
+  // No `subclasses` field exists on the real classes() payload — verified
+  // live; a class's subclasses are only reachable via a separate request
+  // (ENDPOINTS.gameData.subclasses(id), see loadSubclasses below).
   sources: Array<{ sourceId: number }>;
-  classFeatures?: Array<{ id: number; name: string; description: string; level: number }>;
+  classFeatures?: Array<{ id: number; name: string; description: string; requiredLevel: number }>;
 }
 
 /**
@@ -1327,27 +1633,34 @@ interface DdbClass {
  */
 export async function searchClasses(
   client: DdbClient,
-  params: { className?: string }
+  params: ClassSearchParams
 ): Promise<ToolResult> {
-  const cacheKey = "game-data:classes";
+  const cacheKey = campaignCacheKey("game-data:classes", params.campaignId);
   const classes = await client.get<DdbClass[]>(
-    ENDPOINTS.gameData.classes(),
+    ENDPOINTS.gameData.classes(params.campaignId),
     cacheKey,
     86_400_000,
   );
 
-  let matched = classes ?? [];
+  const config = await getGameConfigSafe(client);
+  let matched = withLegacyFlag(config, classes ?? []);
 
   if (params.className) {
     const searchName = params.className.toLowerCase();
     matched = matched.filter((c) => c.name.toLowerCase().includes(searchName));
   }
 
+  // Edition: collapse cross-edition duplicates (e.g. two "Fighter" classes) to the
+  // selected edition.
+  matched = collapseByEdition(matched, params.edition);
+
   matched.sort((a, b) => a.name.localeCompare(b.name));
+
+  const configNote = configUnavailableNote(config, params.edition);
 
   if (matched.length === 0) {
     return {
-      content: [{ type: "text", text: "No classes found matching the search criteria." }],
+      content: [{ type: "text", text: `No classes found matching the search criteria.${configNote}` }],
     };
   }
 
@@ -1357,14 +1670,488 @@ export async function searchClasses(
     const spellcasting = cls.spellCastingAbilityId
       ? ` | Spellcasting: ${STAT_NAMES[cls.spellCastingAbilityId] || "Yes"}`
       : "";
-    lines.push(`- **${cls.name}** — Hit Die: ${hitDie}${spellcasting}`);
+    const editionTag = editionSuffix(cls.isLegacy, params.edition);
+    lines.push(`- **${cls.name}**${editionTag} — Hit Die: ${hitDie}${spellcasting}`);
 
     const desc = stripHtml(cls.description || "").substring(0, 100);
     if (desc) lines.push(`  ${desc}${desc.length >= 100 ? "..." : ""}`);
   }
 
   return {
-    content: [{ type: "text", text: lines.join("\n") }],
+    content: [{ type: "text", text: lines.join("\n") + configNote }],
+  };
+}
+
+/**
+ * Get full details for a specific class, including its level-by-level class
+ * features — useful for comparing how a class changed between the 2014 and 2024
+ * rules (e.g. the Ranger's Favored Enemy).
+ */
+export async function getClass(
+  client: DdbClient,
+  params: { className: string; edition?: Edition; campaignId?: number }
+): Promise<ToolResult> {
+  const cacheKey = campaignCacheKey("game-data:classes", params.campaignId);
+  const classes = await client.get<DdbClass[]>(
+    ENDPOINTS.gameData.classes(params.campaignId),
+    cacheKey,
+    86_400_000,
+  );
+
+  const config = await getGameConfigSafe(client);
+  const annotated = withLegacyFlag(config, classes ?? []);
+
+  const searchName = params.className.toLowerCase();
+  let candidates = annotated.filter((c) => c.name.toLowerCase() === searchName);
+  if (candidates.length === 0) {
+    candidates = annotated.filter((c) => c.name.toLowerCase().includes(searchName));
+  }
+
+  if (candidates.length === 0) {
+    return {
+      content: [{ type: "text", text: `Class "${params.className}" not found.` }],
+    };
+  }
+
+  const cls = pickByEdition(candidates, params.edition);
+
+  const lines: string[] = [];
+  const editionLabel = editionHeaderLabel(cls.isLegacy);
+  lines.push(`# ${cls.name}${editionLabel}`);
+
+  const hitDie = cls.hitDice ? `d${cls.hitDice}` : "?";
+  lines.push(`**Hit Die:** ${hitDie}`);
+
+  if (cls.primaryAbilities && cls.primaryAbilities.length > 0) {
+    const abilities = cls.primaryAbilities.map((id) => STAT_NAMES[id] ?? id).join(", ");
+    lines.push(`**Primary Abilities:** ${abilities}`);
+  }
+
+  if (cls.spellCastingAbilityId) {
+    lines.push(`**Spellcasting Ability:** ${STAT_NAMES[cls.spellCastingAbilityId] ?? "Yes"}`);
+  }
+
+  if (cls.description) {
+    lines.push("");
+    lines.push(stripHtml(cls.description));
+  }
+
+  if (cls.classFeatures && cls.classFeatures.length > 0) {
+    lines.push("\n## Class Features\n");
+    const byLevel = [...cls.classFeatures].sort((a, b) => (a.requiredLevel ?? 0) - (b.requiredLevel ?? 0));
+    for (const feature of byLevel) {
+      lines.push(`### Level ${feature.requiredLevel ?? "?"}: ${feature.name}`);
+      lines.push(stripHtml(feature.description || ""));
+      lines.push("");
+    }
+  }
+
+  return {
+    content: [{ type: "text", text: lines.join("\n") + configUnavailableNote(config, params.edition) }],
+  };
+}
+
+// --- Subclass types ---
+//
+// D&D Beyond has no "get subclass by name" endpoint independent of a class,
+// and no endpoint that returns every subclass at once — subclasses are only
+// reachable per parent base class via ENDPOINTS.gameData.subclasses(classId).
+// Each returned subclass record is shaped like a full DdbClass (it carries
+// its own hitDice, primaryAbilities, etc., mirroring the base class shape),
+// and critically its `classFeatures` array is the *merged* base-class +
+// subclass-only feature list — not the subclass's own features alone. See
+// subclassOnlyFeatures() below.
+
+interface DdbSubclassFeature {
+  id: number;
+  name: string;
+  description: string;
+  requiredLevel: number;
+}
+
+interface DdbSubclass {
+  id: number;
+  name: string;
+  description: string;
+  cardDescription?: string | null;
+  subclassTagline?: string | null;
+  subclassFlavorText?: string | null;
+  parentClassId: number;
+  spellCastingAbilityId?: number | null;
+  primaryAbilities?: number[];
+  hitDice?: number;
+  isHomebrew?: boolean;
+  sources?: Array<{ sourceId: number }>;
+  classFeatures?: DdbSubclassFeature[];
+}
+
+/**
+ * Loads the subclasses available under a given base class definition ID,
+ * independent of any character. Cached per class ID for 24h — the same TTL
+ * used for classes()/feats()/etc — so a cold `get_subclass` call with no
+ * `className` (which has to check every class) only pays the full N-request
+ * cost once a day; later lookups reuse the per-class cache entries.
+ */
+async function loadSubclasses(client: DdbClient, baseClassId: number, campaignId?: number): Promise<DdbSubclass[]> {
+  return client.get<DdbSubclass[]>(
+    ENDPOINTS.gameData.subclasses(baseClassId, campaignId),
+    campaignCacheKey(`subclasses:class:${baseClassId}`, campaignId),
+    86_400_000,
+  );
+}
+
+/** Result of isolating a subclass's own features from its merged base+subclass
+ * list. `baseUnavailable` is set when the base class's own feature list came
+ * back empty/missing while the subclass has features to diff against it — in
+ * that case `features` is deliberately the full (unfiltered) merged list, not
+ * `[]`, so callers can tell "nothing to exclude" apart from "couldn't exclude
+ * anything" and choose to suppress/flag rather than silently show a wrong
+ * answer. */
+interface SubclassOnlyFeaturesResult {
+  features: DdbSubclassFeature[];
+  baseUnavailable: boolean;
+}
+
+/**
+ * Isolates a subclass's own features from the merged base+subclass list its
+ * `classFeatures` array actually carries, by excluding any feature whose ID
+ * also appears on the parent base class. ID-diffing (rather than trusting
+ * some section/tier flag) is deliberate: nothing in the payload reliably
+ * marks a feature as subclass-only, but IDs are stable and the base class's
+ * own feature list is already available from getClass/loadSubclasses' caller.
+ *
+ * Guards against the base class's `classFeatures` coming back empty or
+ * missing (unowned source, campaign-narrowed response): with no base IDs to
+ * exclude, a naive diff would return the subclass's *entire* merged list —
+ * the whole base-class chassis misattributed as subclass-only. See
+ * baseUnavailable above.
+ */
+function subclassOnlyFeatures(subclass: DdbSubclass, baseClass: DdbClass): SubclassOnlyFeaturesResult {
+  const subclassFeatures = subclass.classFeatures ?? [];
+  const baseFeatures = baseClass.classFeatures ?? [];
+  if (baseFeatures.length === 0 && subclassFeatures.length > 0) {
+    return { features: subclassFeatures, baseUnavailable: true };
+  }
+  const baseIds = new Set(baseFeatures.map((f) => f.id));
+  return { features: subclassFeatures.filter((f) => !baseIds.has(f.id)), baseUnavailable: false };
+}
+
+/** A base class annotated with its computed isLegacy flag (see withLegacyFlag). */
+type AnnotatedClass = DdbClass & { isLegacy: boolean | undefined };
+
+/**
+ * Resolves candidate base classes for a subclass lookup: by name (respecting
+ * edition) when `className` is given, else every class matching the
+ * requested edition (or every class in both editions, if neither is given).
+ * Shared by getSubclass and searchSubclasses so both narrow the same way.
+ *
+ * `exactOnly` suppresses the substring fallback below, returning `{ error }`
+ * on anything short of an exact (case-insensitive) base-class name match.
+ * loadAllClassFeatures passes `true` here: unlike getSubclass/searchSubclasses
+ * — where `className` only ever means "a base class name" — its candidate
+ * list also gates which classes' subclasses get fetched at all, and its own
+ * `className` filter runs later against a *composite* class+subclass name
+ * (e.g. "Cleric (War Domain)"). A substring match here only ever inspects
+ * base-class names, so it can resolve to the wrong class — or the right
+ * class plus a false positive — while silently dropping every other class
+ * whose *subclass* name would have matched the composite filter. See
+ * loadAllClassFeatures for the full explanation and the regression this
+ * guards (search_class_features, PR #12 review, className: "War").
+ */
+function resolveCandidateClasses(
+  classes: AnnotatedClass[],
+  className: string | undefined,
+  edition: Edition | undefined,
+  exactOnly = false,
+): AnnotatedClass[] | { error: string } {
+  if (!className) {
+    return edition ? classes.filter((c) => Boolean(c.isLegacy) === (edition === "2014")) : classes;
+  }
+
+  const searchClass = className.toLowerCase();
+  let byName = classes.filter((c) => c.name.toLowerCase() === searchClass);
+  if (byName.length === 0 && !exactOnly) byName = classes.filter((c) => c.name.toLowerCase().includes(searchClass));
+  if (byName.length === 0) {
+    return { error: `Class "${className}" not found.` };
+  }
+
+  if (!edition) return byName;
+  const editionMatched = byName.filter((c) => Boolean(c.isLegacy) === (edition === "2014"));
+  // Fall back to the unfiltered name match rather than erroring outright —
+  // e.g. a class that only exists pre-2024 shouldn't 0-result an edition:2024 query.
+  return editionMatched.length > 0 ? editionMatched : byName;
+}
+
+/** One subclass candidate paired with the base class it was found under. */
+interface SubclassMatch {
+  subclass: DdbSubclass;
+  baseClass: AnnotatedClass;
+}
+
+/**
+ * Separates fulfilled values from rejected results out of a
+ * `Promise.allSettled` batch and counts the rejections, so callers can
+ * surface "N of M requests failed" instead of a bare `continue` silently
+ * dropping them (as this file's three per-class fan-outs used to). Shared by
+ * findSubclassMatches, searchSubclasses, and loadAllClassFeatures so all
+ * three report incompleteness the same way.
+ */
+function settleAll<T>(results: PromiseSettledResult<T>[]): { values: T[]; failureCount: number; total: number } {
+  const values: T[] = [];
+  let failureCount = 0;
+  for (const r of results) {
+    if (r.status === "fulfilled") values.push(r.value);
+    else failureCount++;
+  }
+  return { values, failureCount, total: results.length };
+}
+
+interface SubclassMatchesResult {
+  matches: SubclassMatch[];
+  failureCount: number;
+  total: number;
+}
+
+/**
+ * Searches every candidate base class's subclass list for a name match.
+ * Exact matches (across all candidate classes) win over partial matches.
+ * A class with no subclass content reachable for this account/edition (e.g.
+ * legacy content from an unowned sourcebook) resolves as an empty list, not
+ * a rejection, and doesn't affect failureCount. A class whose *request*
+ * fails (auth expiry, transient error, circuit breaker) is counted via
+ * settleAll rather than silently skipped — callers get failureCount/total so
+ * they can distinguish "genuinely not found" from "some classes couldn't be
+ * checked". Throws only when every candidate class's request failed.
+ */
+async function findSubclassMatches(
+  client: DdbClient,
+  candidateClasses: AnnotatedClass[],
+  subclassSearchName: string,
+  campaignId?: number,
+): Promise<SubclassMatchesResult> {
+  const searchName = subclassSearchName.toLowerCase();
+  const settled = await Promise.allSettled(
+    candidateClasses.map(async (baseClass) => ({
+      baseClass,
+      subclasses: await loadSubclasses(client, baseClass.id, campaignId),
+    }))
+  );
+  const { values, failureCount, total } = settleAll(settled);
+
+  if (failureCount === total && total > 0) {
+    throw new Error("Failed to load subclasses: all requests failed. Check your authentication or try again later.");
+  }
+
+  const exact: SubclassMatch[] = [];
+  const partial: SubclassMatch[] = [];
+  for (const { baseClass, subclasses } of values) {
+    for (const subclass of subclasses ?? []) {
+      if (subclass.name.toLowerCase() === searchName) {
+        exact.push({ subclass, baseClass });
+      } else if (subclass.name.toLowerCase().includes(searchName)) {
+        partial.push({ subclass, baseClass });
+      }
+    }
+  }
+  return { matches: exact.length > 0 ? exact : partial, failureCount, total };
+}
+
+/**
+ * Search for subclasses by name and/or parent class — the character-
+ * independent counterpart to searchClasses. Mirrors its conventions
+ * (edition collapsing, "(Legacy)"/"[2014]"/"[2024]" tagging).
+ */
+export async function searchSubclasses(
+  client: DdbClient,
+  params: SubclassSearchParams,
+): Promise<ToolResult> {
+  const classesRaw = await client.get<DdbClass[]>(
+    ENDPOINTS.gameData.classes(params.campaignId),
+    campaignCacheKey("game-data:classes", params.campaignId),
+    86_400_000,
+  );
+  const config = await getGameConfigSafe(client);
+  const classes = withLegacyFlag(config, classesRaw ?? []) as AnnotatedClass[];
+
+  const candidates = resolveCandidateClasses(classes, params.className, params.edition);
+  if ("error" in candidates) {
+    return { content: [{ type: "text", text: candidates.error }] };
+  }
+
+  const searchName = (params.name ?? "").toLowerCase();
+  const settled = await Promise.allSettled(
+    candidates.map(async (baseClass) => ({
+      baseClass,
+      subclasses: await loadSubclasses(client, baseClass.id, params.campaignId),
+    }))
+  );
+  const { values, failureCount, total: fetchTotal } = settleAll(settled);
+
+  if (failureCount === fetchTotal && fetchTotal > 0) {
+    return {
+      content: [{
+        type: "text",
+        text: "Failed to load subclasses: all requests failed. Check your authentication or try again later.",
+      }],
+    };
+  }
+
+  let matches: SubclassMatch[] = [];
+  for (const { baseClass, subclasses } of values) {
+    for (const subclass of subclasses ?? []) {
+      if (!searchName || subclass.name.toLowerCase().includes(searchName)) {
+        matches.push({ subclass, baseClass });
+      }
+    }
+  }
+
+  // Edition: collapse cross-edition duplicates (same class + subclass name)
+  // to the selected edition. Keyed on class+name, not just name, since two
+  // different classes can share a subclass name only in theory — kept safe
+  // either way.
+  if (params.edition) {
+    const byKey = new Map<string, SubclassMatch[]>();
+    for (const m of matches) {
+      const key = `${m.baseClass.name.toLowerCase()}|${m.subclass.name.toLowerCase()}`;
+      const arr = byKey.get(key);
+      if (arr) arr.push(m);
+      else byKey.set(key, [m]);
+    }
+    const wantLegacy = params.edition === "2014";
+    matches = Array.from(byKey.values()).map(
+      (group) => group.find((m) => Boolean(m.baseClass.isLegacy) === wantLegacy) ?? group[0]
+    );
+  }
+
+  matches.sort((a, b) => {
+    const classComp = a.baseClass.name.localeCompare(b.baseClass.name);
+    if (classComp !== 0) return classComp;
+    return a.subclass.name.localeCompare(b.subclass.name);
+  });
+
+  const failureNote = failureCount > 0
+    ? `\n\n*Note: ${failureCount} of ${fetchTotal} classes could not be loaded; these results may be incomplete.*`
+    : "";
+  const configNote = configUnavailableNote(config, params.edition);
+
+  if (matches.length === 0) {
+    return { content: [{ type: "text", text: `No subclasses found matching the search criteria.${failureNote}${configNote}` }] };
+  }
+
+  const lines = [`# Subclass Search Results (${matches.length} found)\n`];
+  for (const { subclass, baseClass } of matches) {
+    const editionTag = editionSuffix(baseClass.isLegacy, params.edition);
+    const flavor = subclass.cardDescription || stripHtml(subclass.description || "").substring(0, 100);
+    lines.push(`- **${subclass.name}**${editionTag} — ${baseClass.name}${flavor ? ` — ${flavor}` : ""}`);
+  }
+
+  return { content: [{ type: "text", text: lines.join("\n") + failureNote + configNote }] };
+}
+
+/**
+ * Get full details for a specific subclass, including its own level-by-level
+ * features (isolated from the base class's), independent of any character —
+ * so a subclass no roster character has, or levels beyond any character's
+ * current level, are still reachable. Mirrors getClass's conventions.
+ */
+export async function getSubclass(
+  client: DdbClient,
+  params: { subclassName: string; className?: string; edition?: Edition; campaignId?: number },
+): Promise<ToolResult> {
+  const classesRaw = await client.get<DdbClass[]>(
+    ENDPOINTS.gameData.classes(params.campaignId),
+    campaignCacheKey("game-data:classes", params.campaignId),
+    86_400_000,
+  );
+  const config = await getGameConfigSafe(client);
+  const classes = withLegacyFlag(config, classesRaw ?? []) as AnnotatedClass[];
+
+  const candidates = resolveCandidateClasses(classes, params.className, params.edition);
+  if ("error" in candidates) {
+    return { content: [{ type: "text", text: candidates.error }] };
+  }
+
+  let matchResult;
+  try {
+    matchResult = await findSubclassMatches(client, candidates, params.subclassName, params.campaignId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load subclasses";
+    return { content: [{ type: "text", text: message }] };
+  }
+
+  let { matches } = matchResult;
+  const { failureCount, total: fetchTotal } = matchResult; // stable across the edition-narrowing reassignment below
+
+  if (matches.length === 0) {
+    const scope = params.className ? ` under "${params.className}"` : "";
+    const failureNote = failureCount > 0
+      ? ` ${failureCount} of ${fetchTotal} classes could not be checked (request failures) — it may exist there rather than being genuinely absent.`
+      : "";
+    return {
+      content: [{
+        type: "text",
+        text: `Subclass "${params.subclassName}"${scope} not found. It may not exist, or its sourcebook may not be owned/available on this D&D Beyond account.${failureNote}`,
+      }],
+    };
+  }
+
+  // Edition: pick the matching variant among same-name candidates. Always
+  // runs (not just when params.edition is set) so a no-edition call defaults
+  // to DEFAULT_EDITION instead of whichever candidate findSubclassMatches
+  // happened to return first — mirrors pickByEdition's fix for the same
+  // defect in every other get_* detail handler.
+  {
+    const wantLegacy = (params.edition ?? DEFAULT_EDITION) === "2014";
+    matches = [matches.find((m) => Boolean(m.baseClass.isLegacy) === wantLegacy) ?? matches[0]];
+  }
+
+  const { subclass, baseClass } = matches[0];
+  const failureNote = failureCount > 0
+    ? `\n\n*Note: ${failureCount} of ${fetchTotal} classes could not be loaded; other subclasses of the same name may exist there.*`
+    : "";
+
+  const lines: string[] = [];
+  const editionLabel = editionHeaderLabel(baseClass.isLegacy);
+  lines.push(`# ${subclass.name}${editionLabel}`);
+  lines.push(`*${baseClass.name} subclass*`);
+
+  const flavor = subclass.subclassTagline || subclass.cardDescription;
+  if (flavor) lines.push(`\n*${flavor}*`);
+
+  if (subclass.spellCastingAbilityId && subclass.spellCastingAbilityId !== baseClass.spellCastingAbilityId) {
+    lines.push(`\n**Spellcasting Ability:** ${STAT_NAMES[subclass.spellCastingAbilityId] ?? "Yes"}`);
+  }
+
+  const description = subclass.subclassFlavorText || subclass.description;
+  if (description) {
+    lines.push("");
+    lines.push(stripHtml(description));
+  }
+
+  const { features: ownFeaturesRaw, baseUnavailable } = subclassOnlyFeatures(subclass, baseClass);
+  const ownFeatures = [...ownFeaturesRaw].sort((a, b) => (a.requiredLevel ?? 0) - (b.requiredLevel ?? 0));
+
+  if (baseUnavailable) {
+    // Distinct from the genuine-empty case below: here the subclass *does*
+    // have features, but the base class's own feature list came back empty,
+    // so nothing could be safely excluded — showing the merged list would
+    // misattribute the entire base-class chassis to this subclass.
+    lines.push(
+      "\n*Base-class feature list unavailable, so subclass-only features can't be isolated; the source may be unowned or campaign-narrowed. Try passing `campaignId`.*"
+    );
+  } else if (ownFeatures.length > 0) {
+    lines.push("\n## Features\n");
+    for (const feature of ownFeatures) {
+      lines.push(`### Level ${feature.requiredLevel ?? "?"}: ${feature.name}`);
+      lines.push(stripHtml(feature.description || ""));
+      lines.push("");
+    }
+  } else {
+    lines.push("\n*No subclass-specific features returned for this account/edition — the source may be unowned.*");
+  }
+
+  return {
+    content: [{ type: "text", text: lines.join("\n") + failureNote + configUnavailableNote(config, params.edition) }],
   };
 }
 
@@ -1377,37 +2164,50 @@ interface DdbRace {
   baseName: string;
   baseRaceName: string;
   description: string;
+  longDescription?: string;
   isHomebrew: boolean;
   isLegacy: boolean;
   isSubRace: boolean;
   size: string;
   sources: Array<{ sourceId: number }>;
+  racialTraits?: Array<{
+    definition: { name: string; description: string; hideOnDetailsPage?: boolean };
+  }>;
+}
+
+/** Races/species are keyed by fullName/baseName rather than `name`; normalize so
+ * pickByEdition/collapseByEdition (which key off `name`) work here too. */
+function withRaceName<T extends { fullName: string; baseName: string }>(
+  race: T,
+): T & { name: string } {
+  return { ...race, name: race.fullName || race.baseName };
 }
 
 /**
- * Search for character races.
+ * Search for character races (species, in 2024 terminology).
  */
 export async function searchRaces(
   client: DdbClient,
   params: RaceSearchParams
 ): Promise<ToolResult> {
-  const cacheKey = "game-data:races";
+  const cacheKey = campaignCacheKey("game-data:races", params.campaignId);
   const races = await client.get<DdbRace[]>(
-    ENDPOINTS.gameData.races(),
+    ENDPOINTS.gameData.races(params.campaignId),
     cacheKey,
     86_400_000,
   );
 
-  let matched = (races ?? []).filter((r) => r.fullName || r.baseName);
+  let matched = (races ?? []).filter((r) => r.fullName || r.baseName).map(withRaceName);
 
   if (params.name) {
     const searchName = params.name.toLowerCase();
-    matched = matched.filter((r) =>
-      (r.fullName || r.baseName).toLowerCase().includes(searchName)
-    );
+    matched = matched.filter((r) => r.name.toLowerCase().includes(searchName));
   }
 
-  matched.sort((a, b) => (a.fullName || a.baseName).localeCompare(b.fullName || b.baseName));
+  // Edition: collapse cross-edition duplicates to the selected edition.
+  matched = collapseByEdition(matched, params.edition);
+
+  matched.sort((a, b) => a.name.localeCompare(b.name));
 
   if (matched.length === 0) {
     return {
@@ -1417,10 +2217,63 @@ export async function searchRaces(
 
   const lines = [`# Race Search Results (${matched.length} found)\n`];
   for (const race of matched) {
-    const name = race.fullName || race.baseName;
     const desc = stripHtml(race.description || "").substring(0, 100);
-    const legacy = race.isLegacy ? " *(Legacy)*" : "";
-    lines.push(`- **${name}**${legacy} — ${desc}${desc.length >= 100 ? "..." : ""}`);
+    const legacy = editionSuffix(race.isLegacy, params.edition);
+    lines.push(`- **${race.name}**${legacy} — ${desc}${desc.length >= 100 ? "..." : ""}`);
+  }
+
+  return {
+    content: [{ type: "text", text: lines.join("\n") }],
+  };
+}
+
+/**
+ * Get full details for a specific race/species by name, including its racial
+ * traits.
+ */
+export async function getRace(
+  client: DdbClient,
+  params: { raceName: string; edition?: Edition; campaignId?: number }
+): Promise<ToolResult> {
+  const cacheKey = campaignCacheKey("game-data:races", params.campaignId);
+  const races = await client.get<DdbRace[]>(
+    ENDPOINTS.gameData.races(params.campaignId),
+    cacheKey,
+    86_400_000,
+  );
+
+  const named = (races ?? []).filter((r) => r.fullName || r.baseName).map(withRaceName);
+
+  const searchName = params.raceName.toLowerCase();
+  let candidates = named.filter((r) => r.name.toLowerCase() === searchName);
+  if (candidates.length === 0) {
+    candidates = named.filter((r) => r.name.toLowerCase().includes(searchName));
+  }
+
+  if (candidates.length === 0) {
+    return {
+      content: [{ type: "text", text: `Race "${params.raceName}" not found.` }],
+    };
+  }
+
+  const race = pickByEdition(candidates, params.edition);
+
+  const lines: string[] = [];
+  const editionLabel = editionHeaderLabel(race.isLegacy);
+  lines.push(`# ${race.name}${editionLabel}`);
+  if (race.size) lines.push(`*${race.size}*`);
+
+  lines.push("");
+  lines.push(stripHtml(race.longDescription || race.description || "No description available."));
+
+  const traits = (race.racialTraits ?? [])
+    .map((t) => t.definition)
+    .filter((d) => d && d.name && d.description);
+  if (traits.length > 0) {
+    lines.push("\n## Traits\n");
+    for (const trait of traits) {
+      lines.push(`**${trait.name}.** ${stripHtml(trait.description)}`);
+    }
   }
 
   return {
@@ -1436,6 +2289,13 @@ interface DdbBackground {
   description: string;
   isHomebrew: boolean;
   sources: Array<{ sourceId: number }>;
+  primaryAbilities?: number[];
+  skillProficienciesDescription?: string;
+  toolProficienciesDescription?: string;
+  languagesDescription?: string;
+  equipmentDescription?: string;
+  featureName?: string;
+  featureDescription?: string;
 }
 
 /**
@@ -1445,68 +2305,259 @@ export async function searchBackgrounds(
   client: DdbClient,
   params: BackgroundSearchParams
 ): Promise<ToolResult> {
-  const cacheKey = "game-data:backgrounds";
+  const cacheKey = campaignCacheKey("game-data:backgrounds", params.campaignId);
   const backgrounds = await client.get<DdbBackground[]>(
-    ENDPOINTS.gameData.backgrounds(),
+    ENDPOINTS.gameData.backgrounds(params.campaignId),
     cacheKey,
     86_400_000,
   );
 
-  let matched = backgrounds ?? [];
+  const config = await getGameConfigSafe(client);
+  let matched = withLegacyFlag(config, backgrounds ?? []);
 
   if (params.name) {
     const searchName = params.name.toLowerCase();
     matched = matched.filter((b) => b.name.toLowerCase().includes(searchName));
   }
 
+  // Edition: collapse cross-edition duplicates (e.g. two "Noble" backgrounds) to
+  // the selected edition.
+  matched = collapseByEdition(matched, params.edition);
+
   matched.sort((a, b) => a.name.localeCompare(b.name));
+
+  const configNote = configUnavailableNote(config, params.edition);
 
   if (matched.length === 0) {
     return {
-      content: [{ type: "text", text: "No backgrounds found matching the search criteria." }],
+      content: [{ type: "text", text: `No backgrounds found matching the search criteria.${configNote}` }],
     };
   }
 
   const lines = [`# Background Search Results (${matched.length} found)\n`];
   for (const bg of matched) {
     const desc = stripHtml(bg.description || "").substring(0, 100);
-    lines.push(`- **${bg.name}** — ${desc}${desc.length >= 100 ? "..." : ""}`);
+    const editionTag = editionSuffix(bg.isLegacy, params.edition);
+    lines.push(`- **${bg.name}**${editionTag} — ${desc}${desc.length >= 100 ? "..." : ""}`);
   }
 
   return {
-    content: [{ type: "text", text: lines.join("\n") }],
+    content: [{ type: "text", text: lines.join("\n") + configNote }],
+  };
+}
+
+/**
+ * Get full details for a specific background by name, including its ability
+ * score choices, proficiencies, and granted feature — useful for questions like
+ * "what ability scores does the 2024 Noble background offer?"
+ */
+export async function getBackground(
+  client: DdbClient,
+  params: { backgroundName: string; edition?: Edition; campaignId?: number }
+): Promise<ToolResult> {
+  const cacheKey = campaignCacheKey("game-data:backgrounds", params.campaignId);
+  const backgrounds = await client.get<DdbBackground[]>(
+    ENDPOINTS.gameData.backgrounds(params.campaignId),
+    cacheKey,
+    86_400_000,
+  );
+
+  const config = await getGameConfigSafe(client);
+  const annotated = withLegacyFlag(config, backgrounds ?? []);
+
+  const searchName = params.backgroundName.toLowerCase();
+  let candidates = annotated.filter((b) => b.name.toLowerCase() === searchName);
+  if (candidates.length === 0) {
+    candidates = annotated.filter((b) => b.name.toLowerCase().includes(searchName));
+  }
+
+  if (candidates.length === 0) {
+    return {
+      content: [{ type: "text", text: `Background "${params.backgroundName}" not found.` }],
+    };
+  }
+
+  const bg = pickByEdition(candidates, params.edition);
+
+  const lines: string[] = [];
+  const editionLabel = editionHeaderLabel(bg.isLegacy);
+  lines.push(`# ${bg.name}${editionLabel}`);
+
+  if (bg.primaryAbilities && bg.primaryAbilities.length > 0) {
+    const abilities = bg.primaryAbilities.map((id) => STAT_NAMES[id] ?? id).join(", ");
+    lines.push(`**Ability Score Choices:** ${abilities}`);
+  }
+  if (bg.skillProficienciesDescription) lines.push(`**Skill Proficiencies:** ${stripHtml(bg.skillProficienciesDescription)}`);
+  if (bg.toolProficienciesDescription) lines.push(`**Tool Proficiencies:** ${stripHtml(bg.toolProficienciesDescription)}`);
+  if (bg.languagesDescription) lines.push(`**Languages:** ${stripHtml(bg.languagesDescription)}`);
+  if (bg.equipmentDescription) lines.push(`**Equipment:** ${stripHtml(bg.equipmentDescription)}`);
+  if (bg.featureName) {
+    lines.push(`**Feature: ${bg.featureName}**${bg.featureDescription ? " " + stripHtml(bg.featureDescription) : ""}`);
+  }
+
+  lines.push("");
+  lines.push(stripHtml(bg.description || "No description available."));
+
+  return {
+    content: [{ type: "text", text: lines.join("\n") + configUnavailableNote(config, params.edition) }],
   };
 }
 
 // --- Class feature types ---
 
-interface DdbClassFeature {
-  id: number;
+/** One class-or-subclass feature flattened for search, tagged with where it
+ * comes from. `subclassName` is set only for subclass-only features. */
+interface ClassFeatureRow {
   name: string;
   description: string;
-  snippet: string;
   requiredLevel: number;
   classId: number;
-  className?: string;
-  isHomebrew: boolean;
-  sources: Array<{ sourceId: number }>;
+  className: string;
+  subclassName?: string;
+  isLegacy: boolean | undefined;
+}
+
+interface LoadAllClassFeaturesResult {
+  rows: ClassFeatureRow[];
+  failureCount: number;
+  total: number;
+  /** Base classes (by name) whose own feature list came back empty/missing,
+   * so their subclasses' features couldn't be isolated and contributed no
+   * rows at all — see subclassOnlyFeatures' baseUnavailable. */
+  baseUnavailableClasses: string[];
+  /** Whether the shared game config was unreachable this call — needed by
+   * the caller to render configUnavailableNote, since config is fetched
+   * internally here rather than by the caller. */
+  configUnavailable: boolean;
 }
 
 /**
- * Search for class features by name, class, or level.
+ * Builds the full corpus of class + subclass features across every base
+ * class, independent of any character. This replaces the old
+ * `class-feature/collection` endpoint, which does not exist on the live
+ * API — every request to it 404s regardless of query params (confirmed by
+ * live probing; see ENDPOINTS.gameData.classFeatureCollection and
+ * docs/plans/2026-08-24-subclass-feature-independence-handoff.md). Base-class features come from
+ * classes(); subclass-only features come from subclasses() per base class,
+ * isolated via subclassOnlyFeatures(). Each underlying request is cached
+ * 24h, so repeat searches (and get_subclass/search_subclasses calls that
+ * touch the same classes) are cheap after the first cold call.
+ *
+ * `className`/`edition` narrow the subclass fan-out to matching base classes
+ * up front via resolveCandidateClasses, when it can resolve an *exact*
+ * base-class name match — a cold `className: "Paladin"` search no longer
+ * pays the full ~24-class request cost. `className` here is matched against
+ * the *composite* class+subclass name a ClassFeatureRow renders (e.g.
+ * "Paladin (Oath of Glory)"), so a query like `className: "Glory"` must
+ * still see every class's subclasses; resolveCandidateClasses only matches
+ * base-class names, so on a non-match (`{ error }`) this falls back to
+ * scanning every class rather than erroring out, preserving that
+ * composite-name matching behavior.
+ *
+ * The narrowing call below passes `exactOnly: true` deliberately. A
+ * substring match against *base-class* names only (e.g. `className: "War"`
+ * matching "Warlock") would narrow the fan-out to Warlock alone and never
+ * fetch Cleric's subclasses at all — silently dropping "War Domain" and its
+ * features, which the composite-name filter further down would otherwise
+ * have matched too. Falling back to a full scan on anything short of an
+ * exact match costs the optimization only for partial/ambiguous class-name
+ * queries; callers filtering by class overwhelmingly type the full class
+ * name, so `className: "Paladin"` — the case this narrowing targets — is
+ * unaffected. See the PR #12 review discussion of this regression.
+ */
+async function loadAllClassFeatures(
+  client: DdbClient,
+  campaignId?: number,
+  className?: string,
+  edition?: Edition,
+): Promise<LoadAllClassFeaturesResult> {
+  const classesRaw = await client.get<DdbClass[]>(
+    ENDPOINTS.gameData.classes(campaignId),
+    campaignCacheKey("game-data:classes", campaignId),
+    86_400_000,
+  );
+  const config = await getGameConfigSafe(client);
+  const allClasses = withLegacyFlag(config, classesRaw ?? []) as AnnotatedClass[];
+
+  const resolved = resolveCandidateClasses(allClasses, className, edition, /* exactOnly */ true);
+  const classes = "error" in resolved ? allClasses : resolved;
+
+  const rows: ClassFeatureRow[] = [];
+  for (const cls of classes) {
+    for (const f of cls.classFeatures ?? []) {
+      rows.push({
+        name: f.name,
+        description: f.description,
+        requiredLevel: f.requiredLevel,
+        classId: cls.id,
+        className: cls.name,
+        isLegacy: cls.isLegacy,
+      });
+    }
+  }
+
+  const settled = await Promise.allSettled(
+    classes.map(async (cls) => ({ cls, subclasses: await loadSubclasses(client, cls.id, campaignId) }))
+  );
+  const { values, failureCount, total } = settleAll(settled);
+
+  const baseUnavailableClasses = new Set<string>();
+  for (const { cls, subclasses } of values) {
+    for (const sub of subclasses ?? []) {
+      const { features, baseUnavailable } = subclassOnlyFeatures(sub, cls);
+      if (baseUnavailable) {
+        // Contribute no subclass rows for this class — showing the merged
+        // list would misattribute the whole base-class chassis. See A2.
+        baseUnavailableClasses.add(cls.name);
+        continue;
+      }
+      for (const f of features) {
+        rows.push({
+          name: f.name,
+          description: f.description,
+          requiredLevel: f.requiredLevel,
+          classId: cls.id,
+          className: `${cls.name} (${sub.name})`,
+          subclassName: sub.name,
+          isLegacy: cls.isLegacy,
+        });
+      }
+    }
+  }
+
+  return {
+    rows,
+    failureCount,
+    total,
+    baseUnavailableClasses: Array.from(baseUnavailableClasses),
+    configUnavailable: config === undefined,
+  };
+}
+
+/**
+ * Search for class features by name, class, or level — covers both
+ * base-class and subclass features (e.g. `className: "Paladin"` matches
+ * base Paladin features and every Oath's features; `name: "Glory"` finds
+ * "Aura of Alacrity" etc. under Oath of Glory without needing to know it's
+ * a Paladin subclass first).
  */
 export async function searchClassFeatures(
   client: DdbClient,
   params: ClassFeatureSearchParams
 ): Promise<ToolResult> {
-  const cacheKey = "game-data:class-features";
-  const features = await client.get<DdbClassFeature[]>(
-    ENDPOINTS.gameData.classFeatureCollection(),
-    cacheKey,
-    86_400_000,
-  );
+  const { rows, failureCount, total: classFetchTotal, baseUnavailableClasses, configUnavailable } =
+    await loadAllClassFeatures(client, params.campaignId, params.className, params.edition);
 
-  let matched = features ?? [];
+  if (failureCount === classFetchTotal && classFetchTotal > 0) {
+    return {
+      content: [{
+        type: "text",
+        text: "Failed to load class features: all requests failed. Check your authentication or try again later.",
+      }],
+    };
+  }
+
+  let matched = rows;
 
   if (params.name) {
     const searchName = params.name.toLowerCase();
@@ -1515,44 +2566,79 @@ export async function searchClassFeatures(
 
   if (params.className) {
     const searchClass = params.className.toLowerCase();
-    matched = matched.filter(
-      (f) => f.className?.toLowerCase().includes(searchClass)
-    );
+    matched = matched.filter((f) => f.className.toLowerCase().includes(searchClass));
   }
 
   if (params.level !== undefined) {
     matched = matched.filter((f) => f.requiredLevel === params.level);
   }
 
+  // Edition: collapse cross-edition duplicates to the selected edition.
+  // Keyed on class+subclass+name — not just name — since e.g. "Channel
+  // Divinity" is a base feature on both Cleric and Paladin and must not
+  // collapse across classes.
+  if (params.edition) {
+    const byKey = new Map<string, ClassFeatureRow[]>();
+    for (const row of matched) {
+      const key = `${row.classId}|${row.subclassName ?? ""}|${row.name.toLowerCase()}`;
+      const arr = byKey.get(key);
+      if (arr) arr.push(row);
+      else byKey.set(key, [row]);
+    }
+    const wantLegacy = params.edition === "2014";
+    matched = Array.from(byKey.values()).map(
+      (group) => group.find((row) => row.isLegacy === wantLegacy) ?? group[0]
+    );
+  }
+
   matched.sort((a, b) => {
-    // Sort by class name, then by level, then by feature name
-    const classComp = (a.className || "").localeCompare(b.className || "");
+    // Sort by class name (subclass rows sort right after their base class,
+    // since "Paladin (Oath of Glory)" > "Paladin"), then by level, then name.
+    const classComp = a.className.localeCompare(b.className);
     if (classComp !== 0) return classComp;
     if (a.requiredLevel !== b.requiredLevel) return a.requiredLevel - b.requiredLevel;
     return a.name.localeCompare(b.name);
   });
 
-  const total = matched.length;
+  const matchedTotal = matched.length;
   matched = matched.slice(0, 30);
+
+  // One honest completeness statement, not two: fold A3's per-class fetch
+  // failures and A2's base-unavailable classes into a single note.
+  const completeness: string[] = [];
+  if (failureCount > 0) {
+    completeness.push(`${failureCount} of ${classFetchTotal} classes could not be loaded`);
+  }
+  if (baseUnavailableClasses.length > 0) {
+    completeness.push(
+      `${baseUnavailableClasses.length} classes have unavailable base-class features, so subclass-only features could not be isolated for them (${baseUnavailableClasses.join(", ")})`
+    );
+  }
+  const completenessNote = completeness.length > 0
+    ? `\n\n*Note: ${completeness.join("; ")} — these results may be incomplete.*`
+    : "";
+  const configNote = configUnavailable && params.edition
+    ? "\n\n*Edition could not be determined — D&D Beyond's config endpoint was unreachable, so edition filtering was not applied.*"
+    : "";
 
   if (matched.length === 0) {
     return {
-      content: [{ type: "text", text: "No class features found matching the search criteria." }],
+      content: [{ type: "text", text: `No class features found matching the search criteria.${completenessNote}${configNote}` }],
     };
   }
 
-  const lines = [`# Class Feature Search Results (${total > 30 ? `showing 30 of ${total}` : `${total} found`})\n`];
+  const lines = [`# Class Feature Search Results (${matchedTotal > 30 ? `showing 30 of ${matchedTotal}` : `${matchedTotal} found`})\n`];
   for (const feature of matched) {
-    const className = feature.className || "Unknown";
     const level = feature.requiredLevel || "?";
-    lines.push(`- **${feature.name}** — ${className} level ${level}`);
+    const editionTag = editionSuffix(feature.isLegacy, params.edition);
+    lines.push(`- **${feature.name}**${editionTag} — ${feature.className} level ${level}`);
 
-    const desc = stripHtml(feature.snippet || feature.description || "").substring(0, 100);
+    const desc = stripHtml(feature.description || "").substring(0, 100);
     if (desc) lines.push(`  ${desc}${desc.length >= 100 ? "..." : ""}`);
   }
 
   return {
-    content: [{ type: "text", text: lines.join("\n") }],
+    content: [{ type: "text", text: lines.join("\n") + completenessNote + configNote }],
   };
 }
 
@@ -1583,7 +2669,8 @@ export async function searchRacialTraits(
     86_400_000,
   );
 
-  let matched = traits ?? [];
+  const config = await getGameConfigSafe(client);
+  let matched = withLegacyFlag(config, traits ?? []);
 
   if (params.name) {
     const searchName = params.name.toLowerCase();
@@ -1597,6 +2684,10 @@ export async function searchRacialTraits(
     );
   }
 
+  // Edition: collapse cross-edition duplicates (same race/trait name) to the
+  // selected edition.
+  matched = collapseByEdition(matched, params.edition);
+
   matched.sort((a, b) => {
     // Sort by race name, then by trait name
     const raceComp = (a.raceName || "").localeCompare(b.raceName || "");
@@ -1606,23 +2697,25 @@ export async function searchRacialTraits(
 
   const total = matched.length;
   matched = matched.slice(0, 30);
+  const configNote = configUnavailableNote(config, params.edition);
 
   if (matched.length === 0) {
     return {
-      content: [{ type: "text", text: "No racial traits found matching the search criteria." }],
+      content: [{ type: "text", text: `No racial traits found matching the search criteria.${configNote}` }],
     };
   }
 
   const lines = [`# Racial Trait Search Results (${total > 30 ? `showing 30 of ${total}` : `${total} found`})\n`];
   for (const trait of matched) {
     const raceName = trait.raceName || "Unknown";
-    lines.push(`- **${trait.name}** — ${raceName}`);
+    const editionTag = editionSuffix(trait.isLegacy, params.edition);
+    lines.push(`- **${trait.name}**${editionTag} — ${raceName}`);
 
     const desc = stripHtml(trait.snippet || trait.description || "").substring(0, 100);
     if (desc) lines.push(`  ${desc}${desc.length >= 100 ? "..." : ""}`);
   }
 
   return {
-    content: [{ type: "text", text: lines.join("\n") }],
+    content: [{ type: "text", text: lines.join("\n") + configNote }],
   };
 }

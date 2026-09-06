@@ -1,0 +1,448 @@
+import { describe, it, expect, vi } from "vitest";
+import { getSubclass, searchSubclasses, searchClassFeatures } from "../../src/tools/reference.js";
+import { DdbClient } from "../../src/api/client.js";
+import { ENDPOINTS } from "../../src/api/endpoints.js";
+
+// D&D Beyond's real source-category IDs (see reference-editions.test.ts): 26 =
+// "5e Core Rules" (2014, legacy), 24 = "5.5e Core Rules" (2024, current).
+const MOCK_CONFIG = {
+  challengeRatings: [], monsterTypes: [], environments: [], alignments: [],
+  damageTypes: [], senses: [], damageAdjustments: [],
+  sources: [
+    { id: 1, name: "PHB 2014", sourceCategoryId: 26 },
+    { id: 145, name: "PHB 2024", sourceCategoryId: 24 },
+  ],
+};
+
+const BASE_PALADIN_FEATURES_2024 = [
+  { id: 1, name: "Lay On Hands", description: "Heal stuff.", requiredLevel: 1 },
+  { id: 2, name: "Paladin Subclass", description: "Choose an oath.", requiredLevel: 3 },
+];
+
+const CLASSES_2024 = [
+  {
+    id: 2190881, name: "Paladin", description: "A paladin.", hitDice: 10, isHomebrew: false,
+    spellCastingAbilityId: 6, sources: [{ sourceId: 145 }], classFeatures: BASE_PALADIN_FEATURES_2024,
+  },
+  {
+    id: 2190886, name: "Wizard", description: "A wizard.", hitDice: 6, isHomebrew: false,
+    spellCastingAbilityId: 4, sources: [{ sourceId: 145 }],
+    classFeatures: [{ id: 100, name: "Channel Divinity", description: "Not actually a wizard feature, just a name collision fixture.", requiredLevel: 3 }],
+  },
+];
+
+const CLASSES_2014 = [
+  {
+    id: 4, name: "Paladin", description: "A paladin (legacy).", hitDice: 10, isHomebrew: false,
+    spellCastingAbilityId: 6, sources: [{ sourceId: 1 }], classFeatures: BASE_PALADIN_FEATURES_2024,
+  },
+];
+
+// Oath of Glory's classFeatures array mirrors live behavior: it's the merged
+// base-class + subclass-only feature list, not the subclass's own alone.
+const OATH_OF_GLORY_2024 = {
+  id: 2190977, name: "Oath of Glory", description: "<p>Strive for glory.</p>",
+  cardDescription: "Strive for the Heights of Heroism", subclassTagline: null, subclassFlavorText: null,
+  parentClassId: 2190881, spellCastingAbilityId: 6, sources: [{ sourceId: 145 }],
+  classFeatures: [
+    ...BASE_PALADIN_FEATURES_2024,
+    { id: 10, name: "Inspiring Smite", description: "Smite stuff.", requiredLevel: 3 },
+    { id: 11, name: "Peerless Athlete", description: "Jump far.", requiredLevel: 3 },
+    { id: 12, name: "Aura of Alacrity", description: "Move fast.", requiredLevel: 7 },
+    { id: 13, name: "Glorious Defense", description: "Block attacks.", requiredLevel: 15 },
+    { id: 14, name: "Living Legend", description: "Become a legend.", requiredLevel: 20 },
+  ],
+};
+
+const OATH_OF_DEVOTION_2024 = {
+  id: 2190976, name: "Oath of Devotion", description: "<p>Uphold justice.</p>",
+  cardDescription: "Uphold the Ideals of Justice and Order", parentClassId: 2190881,
+  spellCastingAbilityId: 6, sources: [{ sourceId: 145 }],
+  classFeatures: [...BASE_PALADIN_FEATURES_2024, { id: 20, name: "Sacred Weapon", description: "Magic weapon.", requiredLevel: 3 }],
+};
+
+const OATH_OF_DEVOTION_2014 = {
+  id: 21, name: "Oath of Devotion", description: "<p>Uphold justice (legacy).</p>",
+  parentClassId: 4, spellCastingAbilityId: 6, sources: [{ sourceId: 1 }],
+  classFeatures: [...BASE_PALADIN_FEATURES_2024, { id: 21, name: "Sacred Weapon (Legacy)", description: "Magic weapon, but old.", requiredLevel: 3 }],
+};
+
+/** Routes client.get by URL: classes() -> the fixture matching `classesFixture`
+ * (2024 by default, unless a request explicitly asks for legacy in tests that
+ * mix editions); subclasses(id) -> the matching subclass list; anything else
+ * (game config) -> MOCK_CONFIG. */
+function mockClient(opts: {
+  classes?: unknown[];
+  subclassesByParent?: Record<number, unknown[]>;
+} = {}): DdbClient {
+  const classes = opts.classes ?? CLASSES_2024;
+  const subclassesByParent = opts.subclassesByParent ?? {
+    2190881: [OATH_OF_GLORY_2024, OATH_OF_DEVOTION_2024],
+    4: [OATH_OF_DEVOTION_2014],
+  };
+
+  return {
+    get: vi.fn().mockImplementation(async (url: string) => {
+      if (url === ENDPOINTS.gameData.classes()) return classes;
+      for (const [parentId, subs] of Object.entries(subclassesByParent)) {
+        if (url === ENDPOINTS.gameData.subclasses(Number(parentId))) return subs;
+      }
+      throw new Error(`Unexpected URL in mock: ${url}`);
+    }),
+    getRaw: vi.fn().mockResolvedValue(MOCK_CONFIG),
+  } as unknown as DdbClient;
+}
+
+describe("getSubclass", () => {
+  it("returns the subclass's own features across all levels, independent of any character", async () => {
+    const result = await getSubclass(mockClient(), { subclassName: "Oath of Glory", className: "Paladin" });
+    const text = result.content[0].text;
+
+    expect(text).toContain("# Oath of Glory");
+    expect(text).toContain("Inspiring Smite");
+    expect(text).toContain("Peerless Athlete");
+    expect(text).toContain("Aura of Alacrity");
+    expect(text).toContain("Glorious Defense");
+    expect(text).toContain("Living Legend");
+    // Levels above any "character's" level (there is none) still show up.
+    expect(text).toContain("Level 15: Glorious Defense");
+    expect(text).toContain("Level 20: Living Legend");
+  });
+
+  it("excludes inherited base-class features from the subclass's own feature list", async () => {
+    const result = await getSubclass(mockClient(), { subclassName: "Oath of Glory", className: "Paladin" });
+    const text = result.content[0].text;
+
+    // Lay On Hands / Paladin Subclass are base Paladin features, not Oath of
+    // Glory's own — subclassOnlyFeatures() must diff them out.
+    expect(text).not.toContain("Lay On Hands");
+    expect(text).not.toContain("Paladin Subclass");
+  });
+
+  it("resolves without a className, scanning all classes", async () => {
+    const result = await getSubclass(mockClient(), { subclassName: "Oath of Glory" });
+    expect(result.content[0].text).toContain("# Oath of Glory");
+  });
+
+  it("selects the edition-matching variant when both exist", async () => {
+    const client = mockClient({
+      classes: [...CLASSES_2024, ...CLASSES_2014],
+      subclassesByParent: { 2190881: [OATH_OF_DEVOTION_2024], 4: [OATH_OF_DEVOTION_2014] },
+    });
+
+    const current = await getSubclass(client, { subclassName: "Oath of Devotion", edition: "2024" });
+    const legacy = await getSubclass(client, { subclassName: "Oath of Devotion", edition: "2014" });
+
+    expect(current.content[0].text).toContain("*(2024)*");
+    expect(current.content[0].text).toContain("Sacred Weapon");
+    expect(current.content[0].text).not.toContain("Sacred Weapon (Legacy)");
+
+    expect(legacy.content[0].text).toContain("*(2014)*");
+    expect(legacy.content[0].text).toContain("Sacred Weapon (Legacy)");
+  });
+
+  // Confirmed HIGH-severity defect via the 2026-09-01 edition-awareness test
+  // suite: with no edition requested, getSubclass used to keep whichever
+  // candidate findSubclassMatches happened to find first — order-dependent
+  // on the fan-out over CLASSES_2014-then-2024 below — rather than defaulting
+  // to DEFAULT_EDITION (2024) like every other get_* detail tool.
+  it("defaults to the 2024 variant when no edition is given", async () => {
+    const client = mockClient({
+      classes: [...CLASSES_2014, ...CLASSES_2024],
+      subclassesByParent: { 4: [OATH_OF_DEVOTION_2014], 2190881: [OATH_OF_DEVOTION_2024] },
+    });
+
+    const result = await getSubclass(client, { subclassName: "Oath of Devotion" });
+    const text = result.content[0].text;
+    expect(text).toContain("*(2024)*");
+    expect(text).toContain("Sacred Weapon");
+    expect(text).not.toContain("Sacred Weapon (Legacy)");
+  });
+
+  it("reports not-found instead of erroring when a subclass isn't reachable for this account/edition", async () => {
+    const result = await getSubclass(mockClient(), { subclassName: "Oath of the Crown", className: "Paladin" });
+    expect(result.content[0].text).toContain("not found");
+  });
+
+  it("reports class-not-found distinctly from subclass-not-found", async () => {
+    const result = await getSubclass(mockClient(), { subclassName: "Anything", className: "Not A Real Class" });
+    expect(result.content[0].text).toContain('Class "Not A Real Class" not found');
+  });
+
+  it("includes subclass flavor text when available", async () => {
+    const result = await getSubclass(mockClient(), { subclassName: "Oath of Glory", className: "Paladin" });
+    expect(result.content[0].text).toContain("Strive for the Heights of Heroism");
+  });
+
+  it("survives one candidate class's subclass request failing (e.g. unowned content)", async () => {
+    const client: DdbClient = {
+      get: vi.fn().mockImplementation(async (url: string) => {
+        if (url === ENDPOINTS.gameData.classes()) return CLASSES_2024;
+        if (url === ENDPOINTS.gameData.subclasses(2190881)) return [OATH_OF_GLORY_2024];
+        if (url === ENDPOINTS.gameData.subclasses(2190886)) throw new Error("D&D Beyond API error: 404 Not Found");
+        throw new Error(`Unexpected URL: ${url}`);
+      }),
+      getRaw: vi.fn().mockResolvedValue(MOCK_CONFIG),
+    } as unknown as DdbClient;
+
+    const result = await getSubclass(client, { subclassName: "Oath of Glory" });
+    expect(result.content[0].text).toContain("# Oath of Glory");
+  });
+});
+
+describe("searchSubclasses", () => {
+  it("lists every subclass under a class", async () => {
+    const result = await searchSubclasses(mockClient(), { className: "Paladin" });
+    const text = result.content[0].text;
+    expect(text).toContain("Oath of Glory");
+    expect(text).toContain("Oath of Devotion");
+  });
+
+  it("finds a subclass by name without knowing its parent class", async () => {
+    const result = await searchSubclasses(mockClient(), { name: "Glory" });
+    expect(result.content[0].text).toContain("Oath of Glory");
+    expect(result.content[0].text).not.toContain("Oath of Devotion");
+  });
+
+  it("collapses cross-edition duplicates when an edition is requested", async () => {
+    const client = mockClient({
+      classes: [...CLASSES_2024, ...CLASSES_2014],
+      subclassesByParent: { 2190881: [OATH_OF_DEVOTION_2024], 4: [OATH_OF_DEVOTION_2014] },
+    });
+    const result = await searchSubclasses(client, { name: "Devotion", edition: "2024" });
+    expect(result.content[0].text.match(/Oath of Devotion/g)?.length).toBe(1);
+  });
+
+  it("reports no matches without erroring", async () => {
+    const result = await searchSubclasses(mockClient(), { name: "Nonexistent Oath" });
+    expect(result.content[0].text).toContain("No subclasses found");
+  });
+});
+
+describe("subclassOnlyFeatures guard (A2)", () => {
+  // Regression coverage for the inversion bug: when the base class's own
+  // classFeatures come back empty/missing (unowned source, campaign-narrowed
+  // response), a naive ID-diff excludes nothing, so the subclass's *merged*
+  // list — the entire base-class chassis — used to leak through as if it
+  // were subclass-only.
+  const PALADIN_NO_FEATURES = {
+    id: 2190881, name: "Paladin", description: "A paladin.", hitDice: 10, isHomebrew: false,
+    spellCastingAbilityId: 6, sources: [{ sourceId: 145 }], classFeatures: [],
+  };
+  const PALADIN_UNDEFINED_FEATURES = {
+    id: 2190881, name: "Paladin", description: "A paladin.", hitDice: 10, isHomebrew: false,
+    spellCastingAbilityId: 6, sources: [{ sourceId: 145 }],
+  };
+
+  function clientWith(baseClass: unknown): DdbClient {
+    return {
+      get: vi.fn().mockImplementation(async (url: string) => {
+        if (url === ENDPOINTS.gameData.classes()) return [baseClass];
+        if (url === ENDPOINTS.gameData.subclasses(2190881)) return [OATH_OF_GLORY_2024];
+        throw new Error(`Unexpected URL in mock: ${url}`);
+      }),
+      getRaw: vi.fn().mockResolvedValue(MOCK_CONFIG),
+    } as unknown as DdbClient;
+  }
+
+  it("get_subclass does not leak the base-class chassis when base classFeatures is []", async () => {
+    const result = await getSubclass(clientWith(PALADIN_NO_FEATURES), { subclassName: "Oath of Glory", className: "Paladin" });
+    const text = result.content[0].text;
+    expect(text).not.toContain("Lay On Hands");
+    expect(text).not.toContain("Paladin Subclass");
+    expect(text).toContain("unavailable");
+  });
+
+  it("get_subclass does not leak the base-class chassis when base classFeatures is undefined", async () => {
+    const result = await getSubclass(clientWith(PALADIN_UNDEFINED_FEATURES), { subclassName: "Oath of Glory", className: "Paladin" });
+    const text = result.content[0].text;
+    expect(text).not.toContain("Lay On Hands");
+    expect(text).not.toContain("Paladin Subclass");
+    expect(text).toContain("unavailable");
+  });
+
+  it("search_class_features emits no duplicated base rows when base classFeatures is []", async () => {
+    const result = await searchClassFeatures(clientWith(PALADIN_NO_FEATURES), { className: "Paladin" });
+    const text = result.content[0].text;
+    expect(text).not.toContain("Lay On Hands");
+    expect(text).toContain("unavailable base-class features");
+  });
+});
+
+describe("partial fan-out failure surfacing (A3)", () => {
+  function clientWithFailures(failIds: number[]): DdbClient {
+    return {
+      get: vi.fn().mockImplementation(async (url: string) => {
+        if (url === ENDPOINTS.gameData.classes()) return CLASSES_2024;
+        for (const [parentId, subs] of Object.entries({
+          2190881: [OATH_OF_GLORY_2024, OATH_OF_DEVOTION_2024],
+        })) {
+          if (url === ENDPOINTS.gameData.subclasses(Number(parentId))) {
+            if (failIds.includes(Number(parentId))) throw new Error("D&D Beyond API error: 500");
+            return subs;
+          }
+        }
+        if (url === ENDPOINTS.gameData.subclasses(2190886)) {
+          if (failIds.includes(2190886)) throw new Error("D&D Beyond API error: 500");
+          return [];
+        }
+        throw new Error(`Unexpected URL in mock: ${url}`);
+      }),
+      getRaw: vi.fn().mockResolvedValue(MOCK_CONFIG),
+    } as unknown as DdbClient;
+  }
+
+  it("searchSubclasses surfaces a partial-failure note while still rendering successful classes", async () => {
+    const result = await searchSubclasses(clientWithFailures([2190886]), {});
+    const text = result.content[0].text;
+    expect(text).toContain("Oath of Glory");
+    expect(text).toContain("Note: 1 of 2 classes could not be loaded");
+  });
+
+  it("searchSubclasses returns an explicit failure message when every class fails", async () => {
+    const result = await searchSubclasses(clientWithFailures([2190881, 2190886]), {});
+    expect(result.content[0].text).toContain("Failed to load subclasses: all requests failed");
+  });
+
+  it("getSubclass returns an explicit failure message when every candidate class fails", async () => {
+    const result = await getSubclass(clientWithFailures([2190881, 2190886]), { subclassName: "Oath of Glory", className: "Paladin" });
+    expect(result.content[0].text).toContain("Failed to load subclasses: all requests failed");
+  });
+
+  it("searchClassFeatures surfaces a partial-failure note while still rendering successful classes", async () => {
+    const result = await searchClassFeatures(clientWithFailures([2190886]), {});
+    const text = result.content[0].text;
+    expect(text).toContain("Oath of Glory");
+    expect(text).toContain("Note:");
+    expect(text).toContain("could not be loaded");
+  });
+
+  it("searchClassFeatures returns an explicit failure message when every class fails", async () => {
+    const result = await searchClassFeatures(clientWithFailures([2190881, 2190886]), {});
+    expect(result.content[0].text).toContain("Failed to load class features: all requests failed");
+  });
+});
+
+describe("loadAllClassFeatures pre-fan-out narrowing (B1)", () => {
+  it("narrows the subclass fan-out to the matching class when className resolves", async () => {
+    const client = mockClient();
+    const result = await searchClassFeatures(client, { className: "Paladin" });
+    expect(result.content[0].text).toContain("Inspiring Smite"); // Oath of Glory
+
+    const calledUrls = (client.get as ReturnType<typeof vi.fn>).mock.calls.map((c: unknown[]) => c[0]);
+    expect(calledUrls).toContain(ENDPOINTS.gameData.subclasses(2190881)); // Paladin
+    expect(calledUrls).not.toContain(ENDPOINTS.gameData.subclasses(2190886)); // Wizard — must not be fetched
+  });
+
+  it("falls back to scanning every class when className only matches the composite subclass name", async () => {
+    // "Glory" doesn't match any *base* class name, so resolveCandidateClasses
+    // can't narrow — loadAllClassFeatures must fall back to the full fan-out
+    // rather than erroring out, preserving the existing composite-name
+    // ("Paladin (Oath of Glory)") post-hoc filter behavior.
+    const result = await searchClassFeatures(mockClient(), { className: "Glory" });
+    const text = result.content[0].text;
+    expect(text).toContain("Oath of Glory");
+    expect(text).toContain("Inspiring Smite");
+  });
+});
+
+// Regression coverage for the PR #12 review finding: a `className` that
+// substring-matches the wrong base class used to narrow the fan-out to that
+// class alone and silently drop every other class's subclass features —
+// even ones the composite-name filter further down would have matched.
+// Fixture mirrors the reviewer's repro exactly: Warlock's own name contains
+// "war"; Cleric doesn't, but owns a "War Domain" subclass.
+describe("loadAllClassFeatures exact-vs-substring className narrowing (PR #12 review)", () => {
+  const WARLOCK = {
+    id: 9001, name: "Warlock", description: "A warlock.", hitDice: 8, isHomebrew: false,
+    spellCastingAbilityId: 6, sources: [{ sourceId: 145 }],
+    classFeatures: [{ id: 900, name: "Eldritch Invocations", description: "Learn eldritch invocations.", requiredLevel: 2 }],
+  };
+  const CLERIC = {
+    id: 9002, name: "Cleric", description: "A cleric.", hitDice: 8, isHomebrew: false,
+    spellCastingAbilityId: 5, sources: [{ sourceId: 145 }],
+    classFeatures: [{ id: 901, name: "Channel Divinity", description: "Channel divine energy.", requiredLevel: 2 }],
+  };
+  const WAR_DOMAIN = {
+    id: 9010, name: "War Domain", description: "<p>A domain of war.</p>", parentClassId: 9002,
+    spellCastingAbilityId: 5, sources: [{ sourceId: 145 }],
+    classFeatures: [
+      { id: 901, name: "Channel Divinity", description: "Channel divine energy.", requiredLevel: 2 }, // merged base feature
+      { id: 950, name: "War Priest", description: "Smite as a bonus action.", requiredLevel: 1 }, // subclass-only
+    ],
+  };
+
+  function warClient(): DdbClient {
+    return {
+      get: vi.fn().mockImplementation(async (url: string) => {
+        if (url === ENDPOINTS.gameData.classes()) return [WARLOCK, CLERIC];
+        if (url === ENDPOINTS.gameData.subclasses(WARLOCK.id)) return [];
+        if (url === ENDPOINTS.gameData.subclasses(CLERIC.id)) return [WAR_DOMAIN];
+        throw new Error(`Unexpected URL in mock: ${url}`);
+      }),
+      getRaw: vi.fn().mockResolvedValue(MOCK_CONFIG),
+    } as unknown as DdbClient;
+  }
+
+  it("a className that substring-matches one class's base name still surfaces another class's matching subclass", async () => {
+    const result = await searchClassFeatures(warClient(), { className: "War" });
+    const text = result.content[0].text;
+    // Pre-fix: this used to narrow to Warlock alone (base name substring-
+    // matches "war"), never fetch Cleric's subclasses, and drop War Priest.
+    expect(text).toContain("War Priest"); // Cleric (War Domain) — must not be dropped
+    expect(text).toContain("Eldritch Invocations"); // Warlock
+  });
+
+  it("an exact className match still narrows the fan-out to that class alone", async () => {
+    const client = warClient();
+    const result = await searchClassFeatures(client, { className: "Warlock" });
+    const text = result.content[0].text;
+    expect(text).toContain("Eldritch Invocations");
+    expect(text).not.toContain("War Priest");
+
+    const calledUrls = (client.get as ReturnType<typeof vi.fn>).mock.calls.map((c: unknown[]) => c[0]);
+    expect(calledUrls).toContain(ENDPOINTS.gameData.subclasses(WARLOCK.id));
+    expect(calledUrls).not.toContain(ENDPOINTS.gameData.subclasses(CLERIC.id)); // Cleric — must not be fetched
+  });
+});
+
+describe("searchClassFeatures", () => {
+  it("finds subclass features by name alone, without className", async () => {
+    const result = await searchClassFeatures(mockClient(), { name: "Glorious Defense" });
+    const text = result.content[0].text;
+    expect(text).toContain("Glorious Defense");
+    expect(text).toContain("Paladin (Oath of Glory)");
+    expect(text).toContain("level 15");
+  });
+
+  it("finds both base and subclass features when filtering by className", async () => {
+    const result = await searchClassFeatures(mockClient(), { className: "Paladin" });
+    const text = result.content[0].text;
+    expect(text).toContain("Lay On Hands"); // base
+    expect(text).toContain("Inspiring Smite"); // Oath of Glory
+    expect(text).toContain("Sacred Weapon"); // Oath of Devotion
+  });
+
+  it("filters by level across base and subclass features", async () => {
+    const result = await searchClassFeatures(mockClient(), { className: "Paladin", level: 20 });
+    const text = result.content[0].text;
+    expect(text).toContain("Living Legend");
+    expect(text).not.toContain("Lay On Hands");
+    expect(text).not.toContain("Inspiring Smite");
+  });
+
+  it("does not collapse same-named base features across different classes when an edition is requested", async () => {
+    // Fixture has "Channel Divinity" as a Wizard base feature (name collision
+    // on purpose) and Paladin has no feature of that name — collapseByEdition
+    // must key on class+name, not name alone, or this would wrongly merge.
+    const result = await searchClassFeatures(mockClient(), { name: "Channel Divinity", edition: "2024" });
+    const text = result.content[0].text;
+    expect(text).toContain("Wizard");
+    expect(text.match(/Channel Divinity/g)?.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("reports no matches without erroring", async () => {
+    const result = await searchClassFeatures(mockClient(), { name: "Definitely Not A Feature" });
+    expect(result.content[0].text).toContain("No class features found");
+  });
+});
