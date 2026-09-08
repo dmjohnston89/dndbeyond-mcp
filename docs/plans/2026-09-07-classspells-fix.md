@@ -247,8 +247,132 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 
 ---
 
+### Task 3: Fix the second, independent copy of the bug in the MCP resource layer
+
+**Why this task exists:** Task 1's reviewer found that `src/resources/character.ts`'s `formatSpellList()` (backing the `dndbeyond://character/{id}/spells` MCP resource) contains its own hand-duplicated copy of the exact same five-bucket spell-flattening logic `getAllSpells()` had — it does not call `getAllSpells()` and does not read `classSpells`, so the same "prepared caster's spellbook silently dropped" bug reproduces through this resource even after Task 1. This wasn't in the original plan because the original diagnosis (BACKLOG.md, the live probe) only looked at `src/tools/character.ts`. Confirmed live: `grep -n formatSpellList src/` shows exactly one call site (`src/resources/character.ts:287`), so this is the only other place carrying the bug.
+
+**Files:**
+- Modify: `src/resources/character.ts:53-60` (`formatSpellList`)
+- Test: `tests/resources/character.test.ts` (new test)
+
+**Interfaces:**
+- Consumes: `DdbCharacter.classSpells` (added in Task 1, already merged — this task's implementer works on top of Task 1's commit)
+
+- [ ] **Step 1: Write the failing test**
+
+Add to `tests/resources/character.test.ts`, inside the existing `describe("Character Resources", ...)` block (after the last existing `it(...)`, before the closing `});` of that describe block):
+
+```typescript
+  it("should surface a prepared spell that exists only in classSpells, in the spells resource", async () => {
+    const characterWithClassSpells: DdbCharacter = {
+      ...mockCharacter,
+      classSpells: [
+        {
+          characterClassId: 1,
+          spells: [
+            {
+              id: 1,
+              definition: {
+                name: "Counterspell",
+                level: 3,
+                school: "Abjuration",
+                description: "Interrupts another spellcaster",
+                range: null,
+                duration: null,
+                activation: null,
+                components: null,
+                componentsDescription: null,
+                concentration: false,
+                ritual: false,
+              },
+              prepared: true,
+              alwaysPrepared: false,
+              usesSpellSlot: true,
+            },
+          ],
+        },
+      ],
+    };
+
+    const mockClient = createMockClient();
+    vi.mocked(mockClient.get).mockResolvedValue(characterWithClassSpells);
+
+    const { mockServer, handlers } = createMockServer();
+    registerCharacterResources(mockServer as any, mockClient);
+
+    const uri = { toString: () => "dndbeyond://character/12345/spells" };
+    const result = await handlers["D&D Beyond Character Spells"](uri);
+
+    expect(result.contents[0].text).toContain("Counterspell");
+  });
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `npm test -- resources/character -t "classSpells"`
+Expected: FAIL — `formatSpellList` doesn't read `char.classSpells`, so "Counterspell" is absent from the output (falls through to `"No spells available."` since `mockCharacter`'s own `spells.*` buckets are all empty).
+
+- [ ] **Step 3: Fix `formatSpellList`**
+
+In `src/resources/character.ts`, change:
+
+```typescript
+function formatSpellList(char: DdbCharacter): string {
+  const allSpells = [
+    ...(char.spells.class ?? []),
+    ...(char.spells.race ?? []),
+    ...(char.spells.background ?? []),
+    ...(char.spells.item ?? []),
+    ...(char.spells.feat ?? []),
+  ];
+```
+
+to:
+
+```typescript
+function formatSpellList(char: DdbCharacter): string {
+  const allSpells = [
+    ...(char.spells.class ?? []),
+    ...(char.spells.race ?? []),
+    ...(char.spells.background ?? []),
+    ...(char.spells.item ?? []),
+    ...(char.spells.feat ?? []),
+    ...(char.classSpells ?? []).flatMap((group) => group.spells ?? []),
+  ];
+```
+
+This mirrors Task 1's fix to `getAllSpells()` exactly. Do not refactor `formatSpellList` to call `getAllSpells()` instead of keeping its own copy — that's a cross-module dedup that neither this plan nor the original bug report asked for; matching the existing duplication (now fixed identically in both places) is the correct scope.
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `npm test -- resources/character -t "classSpells"`
+Expected: PASS
+
+- [ ] **Step 5: Run the full unit suite**
+
+Run: `npm test`
+Expected: PASS
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/resources/character.ts tests/resources/character.test.ts
+git commit -m "fix: flatten classSpells in the character-spells MCP resource too
+
+Task 1 fixed getAllSpells() in src/tools/character.ts, but
+src/resources/character.ts's formatSpellList() is an independent
+hand-duplicated copy of the same five-bucket flattening logic backing
+the dndbeyond://character/{id}/spells resource — it had the identical
+gap. Found during Task 1's review.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
+```
+
+---
+
 ## Self-Review Notes
 
 - **Spec coverage:** BACKLOG.md's fix description had three parts — (1) add `classSpells` to `DdbCharacter`, (2) flatten into `getAllSpells()`, (3) add a fixture where a spell exists only in `classSpells`. All three are Task 1. The backlog entry's closing note ("Consumers sizing prompts against `detail: "full"` should re-measure after this lands — it will grow substantially") is an observation for prompt-budget tuning elsewhere, not a code change this fix needs to make — noted here so it isn't silently dropped, but out of scope for this plan.
 - **Placeholder scan:** none found — every step has literal code/commands.
 - **Type consistency:** `DdbClassSpellGroup` is defined once in Task 1 Step 3 and consumed identically in Task 1 Step 1's test fixture and Step 4's implementation; no naming drift.
+- **Amendment (added after Task 1 was implemented and reviewed):** Task 3 was appended after Task 1's task-reviewer subagent found a second, independent copy of the exact same bug in `src/resources/character.ts`'s `formatSpellList()`, which the original diagnosis in BACKLOG.md never looked at (it only examined `src/tools/character.ts`). This is in scope for the plan's stated Goal ("stop `get_character` and everything downstream... from silently dropping a prepared caster's class spellcasting list") in spirit even though the literal text named only `get_character` — the resource is a sibling read surface with the identical defect, not a new feature.
