@@ -637,3 +637,64 @@ describe("Spell Save DC Calculation", () => {
     expect(text).toContain("Sorcerer: DC 14 (+6 attack)");
   });
 });
+
+describe("classSpells flattening", () => {
+  it("surfaces a prepared spell that exists only in classSpells, not in any spells.* bucket", async () => {
+    const character: DdbCharacter = {
+      ...baseCharacter,
+      classes: [
+        {
+          id: 1,
+          definition: { name: "Wizard" },
+          subclassDefinition: null,
+          level: 5,
+          isStartingClass: true,
+          classFeatures: [],
+        },
+      ],
+      inventory: [],
+      modifiers: { race: [], class: [], background: [], item: [], feat: [], condition: [] },
+      spells: {
+        race: [],
+        class: [],
+        background: [],
+        item: [],
+        feat: [],
+      },
+      classSpells: [
+        {
+          characterClassId: 1,
+          spells: [
+            {
+              id: 1,
+              definition: {
+                name: "Counterspell",
+                level: 3,
+                school: "Abjuration",
+                description: "Interrupts another spellcaster",
+                range: null,
+                duration: null,
+                activation: null,
+                components: null,
+                componentsDescription: null,
+                concentration: false,
+                ritual: false,
+              },
+              prepared: true,
+              alwaysPrepared: false,
+              usesSpellSlot: true,
+            },
+          ],
+        },
+      ],
+    };
+
+    const client = createMockClient();
+    vi.mocked(client.get).mockResolvedValue(character);
+
+    const result = await getCharacter(client, { characterId: 12345, detail: "sheet" });
+    const text = result.content[0].text;
+
+    expect(text).toContain("Counterspell");
+  });
+});

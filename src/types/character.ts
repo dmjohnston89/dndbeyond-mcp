@@ -40,6 +40,7 @@ export interface DdbCharacter {
     available: number;
   }>;
   hitDiceUsed?: number;
+  classSpells?: DdbClassSpellGroup[];
 }
 
 export interface DdbRace {
@@ -90,6 +91,11 @@ export interface DdbSpellsContainer {
   background: DdbSpell[] | null;
   item: DdbSpell[] | null;
   feat: DdbSpell[] | null;
+}
+
+export interface DdbClassSpellGroup {
+  characterClassId: number;
+  spells: DdbSpell[] | null;
 }
 
 export interface DdbSpell {

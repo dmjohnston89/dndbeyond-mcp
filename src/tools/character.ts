@@ -101,6 +101,7 @@ function getAllSpells(char: DdbCharacter): DdbSpell[] {
     ...(char.spells.background ?? []),
     ...(char.spells.item ?? []),
     ...(char.spells.feat ?? []),
+    ...(char.classSpells ?? []).flatMap((group) => group.spells ?? []),
   ];
 }
 
