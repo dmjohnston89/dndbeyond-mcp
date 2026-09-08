@@ -204,4 +204,47 @@ describe("Character Resources", () => {
     expect(result.contents[0].text).toContain("Error:");
     expect(result.contents[0].text).toContain("API error");
   });
+
+  it("should surface a prepared spell that exists only in classSpells, in the spells resource", async () => {
+    const characterWithClassSpells: DdbCharacter = {
+      ...mockCharacter,
+      classSpells: [
+        {
+          characterClassId: 1,
+          spells: [
+            {
+              id: 1,
+              definition: {
+                name: "Counterspell",
+                level: 3,
+                school: "Abjuration",
+                description: "Interrupts another spellcaster",
+                range: null,
+                duration: null,
+                activation: null,
+                components: null,
+                componentsDescription: null,
+                concentration: false,
+                ritual: false,
+              },
+              prepared: true,
+              alwaysPrepared: false,
+              usesSpellSlot: true,
+            },
+          ],
+        },
+      ],
+    };
+
+    const mockClient = createMockClient();
+    vi.mocked(mockClient.get).mockResolvedValue(characterWithClassSpells);
+
+    const { mockServer, handlers } = createMockServer();
+    registerCharacterResources(mockServer as any, mockClient);
+
+    const uri = { toString: () => "dndbeyond://character/12345/spells" };
+    const result = await handlers["D&D Beyond Character Spells"](uri);
+
+    expect(result.contents[0].text).toContain("Counterspell");
+  });
 });
