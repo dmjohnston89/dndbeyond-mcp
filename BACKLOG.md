@@ -1,6 +1,6 @@
 # dndbeyond-mcp — Known Issues & Backlog
 
-**Last updated:** 2026-09-06
+**Last updated:** 2026-09-07
 **Source:** findings from the dndtools full-project review (2026-07-01), which included this fork,
 plus later findings noted inline with their date.
 Roughly priority-ordered. This is the current tracking doc — `AUDIT.md` (2026-02-14) is stale
@@ -44,24 +44,6 @@ Roughly priority-ordered. This is the current tracking doc — `AUDIT.md` (2026-
 - **Waterdeep envelope error returned as data** (`src/api/client.ts`) — a `{ status: "error" }` envelope
   is cast to `T` and handed to callers (→ `TypeError`/garbage). Throw an `HttpError` on non-`success`.
 
-## Read-tool correctness
-
-- **`get_character` omits class spellcasting lists** (`src/tools/character.ts` `getAllSpells`, `:97`;
-  `src/types/character.ts` `DdbSpellsContainer`, `:87`) *(found 2026-09-06)* — `getAllSpells()` reads
-  only the five buckets under `char.spells` (`race`/`class`/`background`/`item`/`feat`). Those are the
-  *granted* spell buckets; a character's actual class spellcasting list (a wizard's spellbook, a
-  cleric's prepared spells) lives in the sibling `classSpells[]`, which is **never read anywhere** —
-  `grep -rn classSpells src/` returns nothing, and `DdbCharacter` has no such field, so it is dropped
-  at the type boundary even if the API returns it. Note `char.spells.class` is *not* the class spell
-  list despite the name. Affects everything downstream: `formatSpells` (`:58`), `formatCharacterFull`'s
-  spell definitions (`:822`), `get_definition`'s spell search (`:713`), and `cast_spell`'s resolution
-  (`:1596`) — which can report a spell the character has as unavailable. **Not yet confirmed against a
-  live payload** (needs auth): dump `character/v5/character/{id}` for a prepared caster and check
-  whether `classSpells` is present and populated. Corroborated by a field report of character reads
-  returning incomplete prepared-spell lists. Fix: add `classSpells` to `DdbCharacter`, flatten it into
-  `getAllSpells()`, and add a fixture where a spell exists *only* in `classSpells`. Consumers sizing
-  prompts against `detail: "full"` should re-measure after this lands — it will grow substantially.
-
 ## Write-tool safety
 
 - **Stale read-modify-write** (`src/tools/character.ts` `updateHp`/`updateCurrency`/`castSpell`) —
@@ -88,6 +70,13 @@ Roughly priority-ordered. This is the current tracking doc — `AUDIT.md` (2026-
 - **`playwright` as a prod dependency** — intentional (the `setup_auth` tool launches Chrome), but an
   LLM tool-call popping a browser is surprising attack surface; consider gating behind an env flag for
   headless deploys.
+- **`detail: "full"` output size** (`src/tools/character.ts` `formatCharacterFull`) — now includes
+  classSpells-derived prepared spells, which can add a couple dozen entries for a caster (one live
+  character added 16). Consumers sizing prompts against `detail: "full"` should re-measure.
+- **Duplicated spell-flattening logic** — `getAllSpells` (`src/tools/character.ts:97`) and
+  `formatSpellList` (`src/resources/character.ts:53`) independently reimplement the same
+  classSpells/granted-buckets flattening; the classSpells gap had to be fixed twice because of it.
+  Worth extracting a shared helper.
 
 ## Docs
 

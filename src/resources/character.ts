@@ -57,6 +57,7 @@ function formatSpellList(char: DdbCharacter): string {
     ...(char.spells.background ?? []),
     ...(char.spells.item ?? []),
     ...(char.spells.feat ?? []),
+    ...(char.classSpells ?? []).flatMap((group) => group.spells ?? []),
   ];
 
   if (allSpells.length === 0) return "No spells available.";

@@ -101,6 +101,7 @@ function getAllSpells(char: DdbCharacter): DdbSpell[] {
     ...(char.spells.background ?? []),
     ...(char.spells.item ?? []),
     ...(char.spells.feat ?? []),
+    ...(char.classSpells ?? []).flatMap((group) => group.spells ?? []),
   ];
 }
 
@@ -1592,14 +1593,31 @@ export async function castSpell(
       60_000
     );
 
-    // Find the spell in character's spell lists
+    // Find the spell in character's spell lists — resolve only against spells
+    // actually prepared/available today, not the full classSpells pool (a
+    // wizard's spellbook can list dozens of known-but-unprepared spells).
     const allSpells = getAllSpells(character);
+    const preparedSpells = allSpells.filter((s) => s.prepared || s.alwaysPrepared);
     const spellNameLower = params.spellName.toLowerCase();
-    const spell = allSpells.find(
+    const spell = preparedSpells.find(
       (s) => s.definition.name.toLowerCase() === spellNameLower
     );
 
     if (!spell) {
+      // Known but not prepared today — give a precise message instead of a
+      // generic "not found" or a self-matching fuzzy suggestion.
+      const knownButUnprepared = allSpells.find(
+        (s) => s.definition.name.toLowerCase() === spellNameLower
+      );
+      if (knownButUnprepared) {
+        return {
+          content: [{
+            type: "text",
+            text: `"${knownButUnprepared.definition.name}" is known but not currently prepared.`,
+          }],
+        };
+      }
+
       // Try fuzzy match
       const spellNames = allSpells.map(s => s.definition.name);
       const matches = fuzzyMatch(params.spellName, spellNames, 3);
