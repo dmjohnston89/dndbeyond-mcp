@@ -70,6 +70,13 @@ Roughly priority-ordered. This is the current tracking doc — `AUDIT.md` (2026-
 - **`playwright` as a prod dependency** — intentional (the `setup_auth` tool launches Chrome), but an
   LLM tool-call popping a browser is surprising attack surface; consider gating behind an env flag for
   headless deploys.
+- **`detail: "full"` output size** (`src/tools/character.ts` `formatCharacterFull`) — now includes
+  classSpells-derived prepared spells, which can add a couple dozen entries for a caster (one live
+  character added 16). Consumers sizing prompts against `detail: "full"` should re-measure.
+- **Duplicated spell-flattening logic** — `getAllSpells` (`src/tools/character.ts:97`) and
+  `formatSpellList` (`src/resources/character.ts:53`) independently reimplement the same
+  classSpells/granted-buckets flattening; the classSpells gap had to be fixed twice because of it.
+  Worth extracting a shared helper.
 
 ## Docs
 
